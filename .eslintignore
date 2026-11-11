@@ -6,3 +6,4 @@ playwright.config.ts
 playwright-report
 test-results
 src/mocks
+server/scripts

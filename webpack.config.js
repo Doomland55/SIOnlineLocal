@@ -42,7 +42,8 @@ module.exports = (env, argv) => {
 		} : env.type === 'library-quest' ? {
 			main: './src/LibraryQuestion.tsx',
 		} : {
-			config: './assets/config.js',
+			// The local server build talks to the game server it is loaded from
+			config: env.local ? './assets/config.local.js' : './assets/config.js',
 			main: './src/Index.tsx',
 		},
 		devtool: argv.mode === 'development' ? 'inline-source-map' : undefined,

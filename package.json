@@ -12,12 +12,18 @@
     "build-lib-player": "webpack --mode production --env type=library-player",
     "build-lib-quest": "webpack --mode production --env type=library-quest",
     "start": "webpack serve --mode development",
+    "server": "ts-node --transpile-only --project server/tsconfig.json server/src/index.ts",
+    "test:server": "node server/scripts/seats-test.js && node server/scripts/smoke-test.js && node server/scripts/signalr-client-test.js && node server/scripts/answer-options-test.js && node server/scripts/host-rights-test.js",
+    "test:local-server": "jest test/localServer.test.ts",
+    "make-test-package": "node server/scripts/make-test-package.js",
+    "serve-local": "npm run build-local && npm run server",
     "test": "jest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
     "test-scenario": "ts-node ./src/Runner.ts",
-    "lint": "eslint . --ext .ts --ext .tsx"
+    "lint": "eslint . --ext .ts --ext .tsx",
+    "build-local": "webpack --mode development --env local=true"
   },
   "keywords": [
     "sigame"
@@ -28,13 +34,16 @@
   "dependencies": {
     "@microsoft/signalr": "10.0.0",
     "@microsoft/signalr-protocol-msgpack": "10.0.0",
+    "@msgpack/msgpack": "^3.1.3",
     "@reduxjs/toolkit": "^2.2.1",
     "accountservice-client": "1.3.0",
     "appregistry-client": "1.0.0",
     "emoji-picker-react": "4.19.1",
+    "express": "^5.3.0",
     "firebase": "12.13.0",
     "jszip": "^3.10.1",
     "localized-strings": "2.0.3",
+    "mime-types": "^3.0.2",
     "nosleep.js": "^0.12.0",
     "openai": "6.37.0",
     "qrcode.react": "^4.0.1",
@@ -43,9 +52,11 @@
     "react-redux": "8.1.3",
     "redux": "5.0.1",
     "redux-thunk": "3.1.0",
+    "sax": "^1.6.1",
     "sicontent-client": "1.0.15",
     "sistatistics-client": "1.5.1",
-    "sistorage-client": "1.4.0"
+    "sistorage-client": "1.4.0",
+    "ws": "^8.22.2"
   },
   "overrides": {
     "@microsoft/signalr": {
@@ -56,10 +67,14 @@
   "devDependencies": {
     "@playwright/test": "^1.64.1",
     "@svgr/webpack": "^7.0.0",
+    "@types/express": "^5.0.6",
     "@types/jest": "^27.5.2",
+    "@types/mime-types": "^3.0.1",
     "@types/react": "^17.0.38",
     "@types/react-dom": "^17.0.11",
     "@types/react-redux": "^7.1.21",
+    "@types/sax": "^1.2.7",
+    "@types/ws": "^8.18.2",
     "@typescript-eslint/eslint-plugin": "^5.8.0",
     "@typescript-eslint/parser": "^5.8.0",
     "clean-webpack-plugin": "^4.0.0",
