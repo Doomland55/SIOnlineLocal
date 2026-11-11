@@ -2,7 +2,7 @@ import { Question } from '../../../src/model/siquester/package';
 import { buildMessage, escapeNewLines, GameMessage, GameStage, MediaCategory } from '../protocol';
 import { AnswerOptionPlan, buildAnswerOptions, buildContentAtoms, ContentAtom, getAnswerContentAtoms } from './questionPlan';
 import { getMediaUrl, LoadedPackage, MEDIA_ROUTE_PREFIX, resolveMediaPath } from './package';
-import { GamePerson, GamePhase, GameSession, PersonRole } from './session';
+import { GamePerson, GamePhase, GameSession, isEmptySlotName, PersonRole } from './session';
 
 /** Callback used by the game to report its state to the outside world. */
 export interface GameObserver {
@@ -15,6 +15,9 @@ export interface GameClientConnection {
 	send(target: string, ...args: unknown[]): void;
 	sendClose(error?: string): void;
 }
+
+/** How many left seats are kept to return players to their places after a page reload. */
+const MAX_SAVED_SEATS = 100;
 
 /** Reasons of player selection. */
 const SelectPlayerReason = {
@@ -106,18 +109,25 @@ export class Game {
 
 	/**
 	 * Name of the person that manages the game (the client shows management buttons when its name matches `HOSTNAME`).
-	 * Created games are owned by the creator, but automatic games and library games start with a bot showman,
-	 * so the management falls back to the first connected live player.
+	 * A live showman always manages the game, then the creator of the game, then the first connected live player:
+	 * automatic games and library games start with a server-driven showman, so the management falls back to a player.
 	 */
 	getManagerName(): string {
+		const { showman } = this.session;
+
+		if (showman.name.trim() && showman.isHuman && showman.isConnected) {
+			return showman.name;
+		}
+
 		const host = this.session.findPerson(this.hostName);
 
-		if (host && host.isHuman && host.isConnected) {
+		if (host && host.name === this.hostName && host.isHuman && host.isConnected) {
 			return this.hostName;
 		}
 
 		const livePlayer = this.session.players.find(player => player.isHuman && player.isConnected);
 
+		// The creator of the game keeps the rights when nobody is connected yet
 		return livePlayer?.name ?? this.hostName;
 	}
 
@@ -151,6 +161,22 @@ export class Game {
 	/** Base url that clients of this game use (media links are built from it). */
 	private baseUrl: string | null = null;
 
+	/** Manager name that has been broadcast to the clients (see `sendHostName`). */
+	private announcedManagerName: string | null = null;
+
+	/** Game options that could be changed by the host (rules of the game). */
+	private readonly options = {
+		oral: false,
+		managed: false,
+		falseStart: false,
+		partialText: false,
+		partialImages: false,
+		useApellations: false,
+		displayAnswerOptionsLabels: true,
+		readingSpeed: 20,
+		partialImageTime: 3,
+	};
+
 	/** Detaches a connection from the game (the person stays in the game as disconnected). */
 	detachConnection(connection: GameClientConnection): void {
 		for (const [name, current] of this.connections.entries()) {
@@ -160,13 +186,102 @@ export class Game {
 				const person = this.session.findPerson(name);
 
 				if (person) {
-					person.isConnected = false;
+					// The person leaves the room: the seat becomes free again, so every client
+					// (including the ones that join later) shows an empty place instead of a ghost
+					this.releaseSeat(person);
+
+					// Other clients must see that the person has left the seat, otherwise the seat stays occupied
+					this.sendAll(buildMessage(GameMessage.Disconnected, name));
+					this.sendAll(buildMessage(GameMessage.PlayerCount, this.session.players.length));
+
+					// `INFO2` resets player scores and question state on the clients, so it is only safe in the room
+					if (this.session.phase === GamePhase.Before) {
+						this.sendInfo();
+					}
+
+					this.sendSums();
+					this.sendReady();
+
+					this.broadcastPersons();
 				}
 			}
 		}
 
+		this.updateManagerName();
 		this.notifyChanged();
 	}
+
+	/** Frees the seat of a person that has left the room. */
+	private releaseSeat(person: GamePerson): void {
+		const { name, role, sum, isMale } = person;
+
+		person.isConnected = false;
+		person.isHuman = false;
+		person.isBot = false;
+		person.isReady = false;
+		person.sum = 0;
+		person.stake = 0;
+		person.state = 'None';
+		person.answer = '';
+
+		if (role === PersonRole.Viewer) {
+			this.session.viewers = this.session.viewers.filter(viewer => viewer !== person);
+			return;
+		}
+
+		// The seat is freed, but a reload of the page must return the person to the same place with the same score
+		if (this.leftSeats.size >= MAX_SAVED_SEATS) {
+			const oldest = this.leftSeats.keys().next().value;
+
+			if (oldest !== undefined) {
+				this.leftSeats.delete(oldest);
+			}
+		}
+
+		this.leftSeats.set(name, {
+			role,
+			index: role === PersonRole.Showman ? -1 : this.session.getPlayerIndex(name),
+			sum,
+			isMale,
+		});
+
+		person.name = GameSession.EMPTY_NAME;
+	}
+
+	/**
+	 * Takes back the seat that a person has left (e.g. after a page reload).
+	 * Returns false when the seat is already taken by somebody else.
+	 */
+	restoreSeat(name: string, role: PersonRole, isMale: boolean): boolean {
+		const seat = this.leftSeats.get(name);
+
+		if (!seat || seat.role !== role) {
+			return false;
+		}
+
+		const person = role === PersonRole.Showman
+			? (isEmptySlotName(this.session.showman.name) ? this.session.showman : null)
+			: this.session.players[seat.index];
+
+		if (!person || !isEmptySlotName(person.name)) {
+			return false;
+		}
+
+		this.leftSeats.delete(name);
+
+		person.name = name;
+		person.isHuman = true;
+		person.isBot = false;
+		person.isConnected = false;
+		person.isMale = isMale;
+		person.isReady = role === PersonRole.Showman;
+		person.sum = seat.sum;
+
+		return true;
+	}
+
+	/** Forgets the saved seats of persons that have left and have not returned. */
+	private readonly leftSeats = new Map<string, { role: PersonRole; index: number; sum: number; isMale: boolean }>();
 
 	/** Removes a person from the game. */
 	removePerson(name: string): void {
@@ -224,6 +339,7 @@ export class Game {
 		));
 
 		this.broadcastPersons();
+		this.updateManagerName();
 		this.notifyChanged();
 	}
 
@@ -416,13 +532,40 @@ export class Game {
 		}
 	}
 
+	/** Broadcasts `HOSTNAME` when the manager of the game has changed. */
+	private updateManagerName(): void {
+		const managerName = this.getManagerName();
+
+		if (managerName === this.announcedManagerName) {
+			return;
+		}
+
+		this.announcedManagerName = managerName;
+		this.sendHostName();
+		this.observer.log(`Управляющий игрой: ${managerName}`);
+	}
+
+	/**
+	 * Sends the name of the person that manages the game.
+	 * The web client enables management buttons (rules, rounds, pause) only when its name matches `HOSTNAME`,
+	 * so the message must be broadcast when management moves to another player (e.g. the first live player joins).
+	 */
+	sendHostName(personName?: string): void {
+		const text = buildMessage(GameMessage.HostName, this.getManagerName());
+
+		if (personName) {
+			this.sendTo(personName, text);
+		} else {
+			this.sendAll(text);
+		}
+	}
+
 	/** Sends game metadata (name, package, host). */
 	sendMetadata(personName?: string): void {
 		const { session } = this;
 
 		const messages = [
 			buildMessage(GameMessage.GameMetadata, session.name, session.packageInfo.package.name, '', ''),
-			buildMessage(GameMessage.HostName, this.getManagerName()),
 			buildMessage(GameMessage.Package, session.packageInfo.package.name, '', this.getPackageLogoUrl() ?? ''),
 		];
 
@@ -460,6 +603,9 @@ export class Game {
 		const { session } = this;
 
 		this.sendMetadata(personName);
+		// The client enables management buttons only when its name matches HOSTNAME
+		this.sendHostName(personName);
+		this.sendOptions(personName);
 		this.sendInfo(personName);
 		this.sendSums(personName);
 		this.sendReady(personName);
@@ -688,7 +834,10 @@ export class Game {
 			case 'CHANGE':
 			case 'APELLATE':
 			case 'AVATAR':
+				break;
+
 			case 'SET_OPTIONS':
+				this.handleSetOptions(person, args);
 				break;
 
 			default:
@@ -825,7 +974,7 @@ export class Game {
 
 		for (const theme of round.themes) {
 			for (const question of theme.questions) {
-				const atoms = buildContentAtoms(question, 20, item => this.resolveMedia(item));
+				const atoms = buildContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item));
 
 				for (const atom of atoms) {
 					if (atom.type !== 'text') {
@@ -1013,7 +1162,7 @@ export class Game {
 			player.stake = 0;
 		}
 
-		this.atoms = buildContentAtoms(question, 20, item => this.resolveMedia(item));
+		this.atoms = buildContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item));
 		this.answerOptions = buildAnswerOptions(question, item => this.resolveMedia(item));
 
 		const questionType = question.type ?? '';
@@ -1363,7 +1512,7 @@ export class Game {
 			this.answerOptions.length > 0 ? this.getRightOptionLabel() ?? right : right,
 		));
 
-		const answerAtoms = getAnswerContentAtoms(question, 20, item => this.resolveMedia(item));
+		const answerAtoms = getAnswerContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item));
 
 		for (const atom of answerAtoms) {
 			if (atom.type === 'text') {
@@ -1533,7 +1682,7 @@ export class Game {
 			return;
 		}
 
-		this.atoms = buildContentAtoms(question, 20, item => this.resolveMedia(item));
+		this.atoms = buildContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item));
 		this.answerOptions = buildAnswerOptions(question, item => this.resolveMedia(item));
 
 		this.sendAll(buildMessage(GameMessage.Question, session.currentPrice));
@@ -1936,14 +2085,34 @@ export class Game {
 				break;
 
 			case 3: {
+				// Jump to a specific round: the round indexes come from the package (see `ROUNDSNAMES`)
 				const roundIndex = parseInt(args[2], 10);
-				this.startRound(roundIndex);
+
+				if (Number.isFinite(roundIndex) && roundIndex >= 0 && roundIndex < this.session.packageInfo.package.rounds.length) {
+					this.skipToRound(roundIndex);
+				}
+
 				break;
 			}
 
 			default:
 				break;
 		}
+	}
+
+	/** Jumps to a round selected by the host. */
+	private skipToRound(roundIndex: number): void {
+		const { session } = this;
+
+		this.cancelPending();
+		session.isQuestionPlaying = false;
+
+		if (session.packageInfo.package.rounds[roundIndex]?.type === 'final') {
+			this.startFinalRound(roundIndex);
+			return;
+		}
+
+		this.startRound(roundIndex);
 	}
 
 	private skipToNextRound(): void {
@@ -1987,6 +2156,117 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.Pause, '-', this.roundTimeLeft));
 	}
 
+	/** Score value used instead of `''` when an option is broadcast. */
+	private handleSetOptions(person: GamePerson, args: string[]): void {
+		if (!this.canManage(person)) {
+			return;
+		}
+
+		const name = args[1];
+		const value = args[2] ?? '';
+
+		if (!name) {
+			return;
+		}
+
+		const applied = this.applyOption(name, value);
+
+		if (!applied) {
+			this.observer.log(`Неизвестный параметр игры от ${person.name}: ${name}`);
+			return;
+		}
+
+		// The same message the real server sends: clients update their settings from it
+		this.sendAll(buildMessage(GameMessage.Options2, person.name, name, value));
+		this.notifyChanged();
+	}
+
+	/** Applies a game option. Returns false for unknown options. */
+	private applyOption(name: string, value: string): boolean {
+		const isEnabled = value.toLowerCase() === 'true';
+		const seconds = Number.parseInt(value, 10);
+		const { options } = this;
+
+		switch (name) {
+			case 'Oral':
+				options.oral = isEnabled;
+				return true;
+
+			case 'Managed':
+				options.managed = isEnabled;
+				return true;
+
+			case 'FalseStart':
+				options.falseStart = isEnabled;
+				return true;
+
+			case 'PartialText':
+				options.partialText = isEnabled;
+				return true;
+
+			case 'PartialImages':
+				options.partialImages = isEnabled;
+				return true;
+
+			case 'UseApellations':
+				options.useApellations = isEnabled;
+				return true;
+
+			case 'DisplayAnswerOptionsLabels':
+				options.displayAnswerOptionsLabels = isEnabled;
+				return true;
+
+			case 'ReadingSpeed':
+			case 'ReadingSpeed2':
+				if (Number.isFinite(seconds) && seconds > 0) {
+					options.readingSpeed = seconds;
+				}
+				return true;
+
+			case 'PartialImageTime':
+			case 'PartialImage':
+				if (Number.isFinite(seconds) && seconds > 0) {
+					options.partialImageTime = seconds;
+				}
+				return true;
+
+			case 'TimeForBlockingButton':
+			case 'ButtonBlocking':
+				if (Number.isFinite(seconds) && seconds > 0) {
+					this.timeSettingsOverride = { ...(this.timeSettingsOverride ?? {}), timeForBlockingButton: seconds };
+				}
+				return true;
+
+			default:
+				return false;
+		}
+	}
+
+	/** Sends the current game options to a client (or to everyone). */
+	sendOptions(personName?: string): void {
+		const { options } = this;
+		const pairs: [string, string][] = [
+			['Oral', String(options.oral)],
+			['Managed', String(options.managed)],
+			['FalseStart', String(options.falseStart)],
+			['PartialText', String(options.partialText)],
+			['PartialImages', String(options.partialImages)],
+			['UseApellations', String(options.useApellations)],
+			['DisplayAnswerOptionsLabels', String(options.displayAnswerOptionsLabels)],
+			['ReadingSpeed', String(options.readingSpeed)],
+			['PartialImageTime', String(options.partialImageTime)],
+			['TimeForBlockingButton', String(this.getTimeSettings().timeForBlockingButton)],
+		];
+
+		const text = buildMessage(GameMessage.Options2, '', ...pairs.flat());
+
+		if (personName) {
+			this.sendTo(personName, text);
+		} else {
+			this.sendAll(text);
+		}
+	}
+
 	private handleValidation(person: GamePerson, args: string[]): void {
 		// Showman validation is not supported by the local server: answers are validated by the engine
 		void person;
@@ -2014,6 +2294,9 @@ export class Game {
 			timeForMakingStake: 30,
 			timeForFinalThinking: 60,
 			timeOfRound: 180,
+			timeForBlockingButton: 5,
+			timeForPrintingAnswer: 60,
+			timeForRightAnswer: 10,
 			...(this.serverTimeSettings ?? {}),
 			...(this.timeSettingsOverride ?? {}),
 		};

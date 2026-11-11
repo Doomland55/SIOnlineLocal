@@ -7,7 +7,7 @@ import { getMediaUrl, getPackageMediaUris, loadPackage, LoadedPackage } from '..
 import { Lobby } from '../server/src/game/lobby';
 import { PackageLibrary } from '../server/src/game/library';
 import { Game } from '../server/src/game/game';
-import { GamePhase, isEmptySlotName } from '../server/src/game/session';
+import { GamePhase, isEmptySlotName, PersonRole } from '../server/src/game/session';
 
 const QUESTION_XML = `<?xml version="1.0" encoding="utf-8"?>
 <package name="Тест" version="5">
@@ -191,6 +191,7 @@ describe('Game engine', () => {
 	let lobby: Lobby;
 	let game: Game;
 	let messages: string[];
+	let playerConnection: { send: (target: string, ...args: unknown[]) => void; sendClose: () => void };
 
 	beforeAll(async () => {
 		dir = createTempDir();
@@ -222,7 +223,7 @@ describe('Game engine', () => {
 		game.session.players[0].name = playerName;
 		game.session.players[0].isHuman = true;
 
-		game.attachConnection(playerName, {
+		playerConnection = {
 			send: (target: string, ...args: unknown[]) => {
 				const [message] = args as [{ Text?: string }];
 
@@ -231,7 +232,9 @@ describe('Game engine', () => {
 				}
 			},
 			sendClose: () => { },
-		}, 'http://192.168.1.10:8080');
+		};
+
+		game.attachConnection(playerName, playerConnection, 'http://192.168.1.10:8080');
 	}
 
 	function hasMessage(prefix: string): boolean {
@@ -263,6 +266,82 @@ describe('Game engine', () => {
 
 		const content = messages.find(text => text.startsWith('ROUNDCONTENT')) ?? '';
 		expect(content).toContain('http://192.168.1.10:8080/package/');
+	});
+
+	it('lets the manager change the rules of the game', () => {
+		// The first connected live player manages automatic games (the showman seat is driven by the server)
+		expect(game.getManagerName()).toBe('Игрок');
+
+		game.handleClientMessage('Игрок', 'SET_OPTIONS\nOral\ntrue');
+
+		expect(hasMessage('OPTIONS2\nИгрок\nOral\ntrue')).toBe(true);
+
+		// Late joiners receive the actual rules, not the defaults
+		messages = [];
+		game.sendFullState('Игрок');
+		expect(hasMessage('OPTIONS2')).toBe(true);
+		expect(messages.some(text => text.includes('Oral\ntrue'))).toBe(true);
+	});
+
+	it('gives the management to the live showman instead of a player', () => {
+		// A human showman takes the seat: the management moves to it, even though the creator is connected
+		game.session.showman.name = 'Ведущий-человек';
+		game.session.showman.isHuman = true;
+		game.session.showman.isConnected = true;
+
+		expect(game.getManagerName()).toBe('Ведущий-человек');
+
+		// When the showman leaves the seat, the creator gets the rights back
+		game.session.showman.isConnected = false;
+		game.session.showman.isHuman = false;
+
+		expect(game.getManagerName()).toBe('Игрок');
+	});
+
+	it('ignores the rules from a person that does not manage the game', () => {
+		game.session.viewers.push({
+			name: 'Зритель',
+			role: PersonRole.Viewer,
+			isMale: false,
+			isHuman: true,
+			isConnected: true,
+			isBot: false,
+			isReady: true,
+			sum: 0,
+			stake: 0,
+			state: 'None',
+			answer: '',
+		});
+
+		game.attachConnection('Зритель', {
+			send: (target: string, ...args: unknown[]) => {
+				const [message] = args as [{ Text?: string }];
+
+				if (target === 'Receive' && message?.Text) {
+					messages.push(message.Text);
+				}
+			},
+			sendClose: () => { },
+		});
+
+		game.handleClientMessage('Зритель', 'SET_OPTIONS\nManaged\ntrue');
+
+		expect(messages.some(text => text.startsWith('OPTIONS2') && text.includes('Managed'))).toBe(false);
+	});
+
+	it('releases the seat of a player that has left and keeps it free for others', () => {
+		game.session.players[0].sum = 300;
+
+		game.detachConnection(playerConnection as never);
+
+		expect(hasMessage('DISCONNECTED\nИгрок')).toBe(true);
+		expect(isEmptySlotName(game.session.players[0].name)).toBe(true);
+		expect(game.session.players[0].isConnected).toBe(false);
+
+		// The saved seat could be taken back, but only while it is still free
+		expect(game.restoreSeat('Игрок', PersonRole.Player, false)).toBe(true);
+		expect(game.session.players[0].name).toBe('Игрок');
+		expect(game.session.players[0].sum).toBe(300);
 	});
 
 	it('plays a question and accepts the right answer', () => {

@@ -114,6 +114,15 @@ export class SIHostHub {
 		// A person that moves from the showman seat to a player seat (or vice versa) leaves the old seat
 		const previousRole = existing?.role ?? null;
 
+		// A person that has left the room (e.g. a page reload) returns to the same place with the same score
+		if (request.Role !== 'Viewer') {
+			const role = request.Role === 'Showman' ? PersonRole.Showman : PersonRole.Player;
+
+			if (!existing && game.restoreSeat(userName, role, request.Sex !== 'Female')) {
+				return this.attach(connection, game, userName);
+			}
+		}
+
 		switch (request.Role) {
 			case 'Showman': {
 				const showman = game.session.showman;

@@ -9,6 +9,7 @@ import Role from '../../../client/models/Role';
 import Path from '../../../model/enums/Path';
 import { navigate } from '../../../utils/Navigator';
 import Constants from '../../../model/enums/Constants';
+import { isHost } from '../../../utils/StateHelpers';
 
 import './GameState.scss';
 import exitImg from '../../../../assets/images/exit.png';
@@ -22,6 +23,9 @@ export default function GameState(): JSX.Element {
 	const playerCount = useAppSelector(state => state.room2.persons.playerCount);
 	const windowWidth = useAppSelector(state => state.ui.windowWidth);
 	const showArenaPlayerCount = deepMode && windowWidth >= Constants.WIDE_WINDOW_WIDTH;
+	const isHostUser = useAppSelector(state => isHost(state));
+	// Both the showman and the host (the person the server reports in HOSTNAME) manage the rounds
+	const canMoveRound = role === Role.Showman || isHostUser;
 
 	const onExit = () => {
 		appDispatch(navigate({ navigation: { path: navigation.returnToLobby ? Path.Lobby : Path.Menu }, saveState: true }));
@@ -81,7 +85,7 @@ export default function GameState(): JSX.Element {
 						<QuestionCounter />
 					</div>
 
-					{role === Role.Showman ? <MoveRoundButton /> : null}
+					{canMoveRound ? <MoveRoundButton /> : null}
 				</h1>
 			</header>
 		</div>
