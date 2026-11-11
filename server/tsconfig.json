@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "lib": ["ES2021", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "ignoreDeprecations": "6.0",
+    "rootDir": "..",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "../src/model/siquester/package.ts", "../src/model/siquester/packageLoader.ts"]
+}

@@ -1,0 +1,18 @@
+{
+	"port": 8080,
+	"host": "0.0.0.0",
+	"publicBaseUrl": null,
+	"name": "SIGame local server",
+	"packagesDir": "server/packages",
+	"dataDir": "server/data",
+	"clientDir": "dist",
+	"maxPackageSizeMb": 512,
+	"botNames": ["Иннокентий", "Александра", "Борис", "Василиса", "Григорий", "Дарья"],
+	"timeSettings": {
+		"timeForChoosingQuestion": 60,
+		"timeForThinkingOnQuestion": 30,
+		"timeForMakingStake": 30,
+		"timeForFinalThinking": 60,
+		"timeOfRound": 180
+	}
+}

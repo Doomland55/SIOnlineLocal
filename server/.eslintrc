@@ -1,0 +1,13 @@
+{
+	"parserOptions": {
+		"project": "./server/tsconfig.json",
+		"tsconfigRootDir": "."
+	},
+	"rules": {
+		"import/no-extraneous-dependencies": "off",
+		"no-console": "off",
+		"@typescript-eslint/no-explicit-any": "off",
+		"@typescript-eslint/no-use-before-define": "off",
+		"no-plusplus": "off"
+	}
+}

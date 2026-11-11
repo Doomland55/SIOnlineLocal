@@ -267,3 +267,10 @@ test-screenshots/
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# Local SIGame server runtime data (uploaded packages, extracted media, avatars)
+/server/data/
+
+# Свои пакеты в локальной библиотеке сервера не коммитим (тестовый остаётся)
+/server/packages/*.siq
+!/server/packages/test-package.siq
