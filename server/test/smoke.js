@@ -352,9 +352,10 @@ async function createGame(baseUrl, packageUri) {
 		isPrivate: false,
 		allowViewers: true,
 		showman: { name: 'Ведущий', isHuman: true, isMale: true },
+		// The web client sends placeholders for free seats (Constants.ANY_NAME = ' ').
 		players: [
-			{ name: 'Игрок 1', isHuman: true, isMale: true },
-			{ name: 'Игрок 2', isHuman: true, isMale: false },
+			{ name: ' ', isHuman: true, isMale: true },
+			{ name: ' ', isHuman: true, isMale: false },
 		],
 		viewers: [],
 		appSettings: {
@@ -461,6 +462,22 @@ async function main() {
 		assert.match(ranged.headers.get('content-range') || '', /^bytes 0-3\/\d+$/, 'partial content range is returned');
 		console.log('✔ media streaming with Range support');
 
+		// The lobby reports free seats (IsOnline: false). The web client enables
+		// the "Player"/"Showman" buttons only when such a seat exists, so an
+		// empty seat must be visible before anyone joins.
+		const lobby = await new TestClient(baseUrl, 'Наблюдатель').connect('sionline');
+		const slice = await lobby.invoke('GetGamesSlice', 0);
+		const listedGame = (slice.Data || []).find(game => game.GameID === gameId);
+		assert.ok(listedGame, 'created game is listed in the lobby');
+
+		const freeShowman = listedGame.Persons.filter(person => person.Role === 'Showman' && person.IsOnline === false);
+		const freePlayers = listedGame.Persons.filter(person => person.Role === 'Player' && person.IsOnline === false);
+
+		assert.strictEqual(freeShowman.length, 1, 'a free showman seat is reported');
+		assert.strictEqual(freePlayers.length, 2, 'free player seats are reported');
+		assert.strictEqual(listedGame.Persons.filter(person => person.IsOnline).length, 0, 'nobody is online yet');
+		console.log('✔ lobby reports free seats so players can join');
+
 		// ------------------------------------------------------------------
 		// Game level
 		// ------------------------------------------------------------------
@@ -486,6 +503,28 @@ async function main() {
 			GameId: gameId, UserName: 'Игрок 2', Role: 'Player', Sex: 'Female', Pin: null,
 		});
 		assert.strictEqual(join2, 'Success', 'player 2 must join');
+
+		// Once the seats are taken the lobby must not advertise them as free.
+		const updatedSlice = await lobby.invoke('GetGamesSlice', 0);
+		const updatedGame = (updatedSlice.Data || []).find(game => game.GameID === gameId);
+		assert.ok(updatedGame, 'game is still listed after joining');
+		assert.strictEqual(
+			updatedGame.Persons.filter(person => person.Role === 'Showman' && person.IsOnline).length,
+			1,
+			'the connected showman is reported as online',
+		);
+		assert.strictEqual(
+			updatedGame.Persons.filter(person => person.Role === 'Player' && person.IsOnline).length,
+			2,
+			'both players are reported as online',
+		);
+		assert.strictEqual(
+			updatedGame.Persons.filter(person => !person.IsOnline).length,
+			0,
+			'no free seats remain after joining',
+		);
+		lobby.close();
+		console.log('✔ lobby seats are updated after joining');
 
 		await player1.waitForStart('INFO2', 3000);
 		const packageInfoMessage = await player1.waitForStart('PACKAGE', 3000);

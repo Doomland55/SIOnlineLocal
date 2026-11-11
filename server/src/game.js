@@ -2243,19 +2243,31 @@ class Game {
 		};
 	}
 
+	/**
+	 * Persons of the game as reported to the lobby.
+	 *
+	 * Free seats are reported too (IsOnline: false): the client enables the
+	 * "Player"/"Showman" buttons only when such a seat exists, so hiding empty
+	 * seats makes a room unjoinable for everyone except viewers.
+	 * Computer-controlled seats are always reported as occupied.
+	 */
 	getPersons() {
 		const persons = [];
 
-		if (this.showman.clientId) {
-			persons.push({ IsOnline: true, Name: this.showman.name, Role: SERVER_ROLE.showman });
-		}
+		const addSeat = seat => {
+			const isOnline = !!seat.clientId || !seat.isHuman;
 
-		for (const player of this.players) {
-			if (player.clientId) {
-				persons.push({ IsOnline: true, Name: player.name, Role: SERVER_ROLE.player });
-			}
-		}
+			persons.push({
+				IsOnline: isOnline,
+				Name: isOnline ? seat.name : '',
+				Role: SERVER_ROLE[seat.role],
+			});
+		};
 
+		addSeat(this.showman);
+		this.players.forEach(addSeat);
+
+		// Viewers are unlimited: only the connected ones are worth reporting.
 		for (const viewer of this.viewers) {
 			if (viewer.clientId) {
 				persons.push({ IsOnline: true, Name: viewer.name, Role: SERVER_ROLE.viewer });
