@@ -5,12 +5,17 @@ import localization from '../../../model/resources/localization';
 
 import './AnswerValidationButtons.scss';
 
-export default function AnswerValidationButtons(): JSX.Element {
+export default function AnswerValidationButtons(): JSX.Element | null {
 	const appDispatch = useAppDispatch();
 	const validation = useAppSelector(state => state.room2.validation);
 	const isConnected = useAppSelector(state => state.common.isSIHostConnected);
 
 	const [firstValidationItem] = validation.queue;
+
+	// Nothing to decide: the buttons are shown only while there is an answer to check
+	if (!firstValidationItem) {
+		return null;
+	}
 
 	const [buttonsBlocked, setButtonsBlocked] = React.useState(false);
 	const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);

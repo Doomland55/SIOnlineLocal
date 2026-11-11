@@ -112,6 +112,32 @@ describe('ClientController - Game Initialization Flow', () => {
 		);
 	});
 
+	describe('onInfo', () => {
+		it('keeps the known avatars of persons when a fresh INFO2 arrives', () => {
+			const persons: Persons = {
+				Player1: {
+					name: 'Player1',
+					sex: Sex.Male,
+					isHuman: true,
+					avatar: 'http://localhost/api/v1/content/avatars/hash/a.png',
+				},
+			};
+
+			controller.onInfo(persons, {
+				name: 'Showman',
+				isReady: true,
+				replic: null,
+				isDeciding: false,
+				isHuman: true,
+				mediaPreloadProgress: 0,
+				mediaPreloadStarted: false,
+			}, state.room2.persons.players);
+
+			// INFO2 itself carries no avatars, so the person must not lose the one that came in AVATAR
+			expect(state.room2.persons.all.Player1.avatar).toBe('http://localhost/api/v1/content/avatars/hash/a.png');
+		});
+	});
+
 	describe('onConnected', () => {
 		it('should handle player connection', () => {
 			const account: Account = {

@@ -50,7 +50,10 @@ const PlayersView: React.FC<PlayersViewProps> = (props) => {
 	const renderPlayer = (player: PlayerInfo, index: number): JSX.Element => {
 		const account = props.all[player.name];
 		const isMe = player.name === name;
-		const avatar = isMe && props.avatar ? props.avatar : account?.avatar;
+		// The avatar chosen by this player is applied to their own card as well, so it appears right away
+		const avatar = isMe
+			? props.avatar ?? account?.avatar ?? null
+			: account?.avatar ?? null;
 
 		const avatarClass = getAvatarClass(account);
 		const isAnswerer = player.state === PlayerStates.Press;

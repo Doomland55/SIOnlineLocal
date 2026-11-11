@@ -85,7 +85,8 @@ function setState(state: State, savedState: SavedState | null, c: Config, isDesk
 			},
 			settings: {
 				...state.settings,
-				appSound: isDesktop,
+				// Sound effects are a part of the game, so they are enabled by default in the browser too
+				appSound: true,
 			},
 		};
 	}
@@ -115,6 +116,9 @@ function setState(state: State, savedState: SavedState | null, c: Config, isDesk
 		settings: savedState.settings ? {
 			...state.settings,
 			...savedState.settings,
+			// A state saved by an older version could have no sound flag: the sounds stay enabled then
+			appSound: savedState.settings.appSound ?? true,
+			soundVolume: savedState.settings.soundVolume || 1,
 			useProxy2: true,
 			appSettings: {
 				falseStart: appSettings.falseStart ?? true,

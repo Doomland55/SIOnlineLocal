@@ -1113,6 +1113,15 @@ const playerHandler = (controller: ClientController, args: string[]) => {
 			controller.onChoose();
 			break;
 
+		// The player in the showman seat (the server drives that seat) checks the answers in an oral game
+		case GameMessages.AskValidate:
+			if (args.length < 3) {
+				break;
+			}
+
+			controller.onAskValidate(parseInt(args[1], 10), args[2], args.length > 3 ? args[3] === '+' : false);
+			break;
+
 		case GameMessages.Validation2:
 			onValidation(controller, localization.apellation, args);
 			break;

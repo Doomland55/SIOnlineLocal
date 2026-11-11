@@ -43,6 +43,9 @@ interface QuestionOutcome {
 
 const MIN_STAKE_STEP = 100;
 
+/** Seconds that the manager (a player in the showman seat of a server-driven game) has to check an answer. */
+const ORAL_VALIDATION_TIMEOUT = 15;
+
 /** A single game hosted by the local server. */
 export class Game {
 	public readonly session: GameSession;
@@ -64,6 +67,9 @@ export class Game {
 
 	/** Players who have already answered the current question. */
 	private readonly answeredPlayers = new Set<number>();
+
+	/** Answers that wait for the decision of the showman in an oral game. */
+	private readonly answersToValidate = new Map<number, number>();
 
 	/** Players who can press the button in the current question. */
 	private pendingPressers: number[] = [];
@@ -1193,6 +1199,7 @@ export class Game {
 		session.answererIndex = -1;
 		session.answerers = [];
 		this.answeredPlayers.clear();
+		this.answersToValidate.clear();
 		this.atomIndex = 0;
 		this.finalAnswers.clear();
 
@@ -1525,6 +1532,31 @@ export class Game {
 		session.players[playerIndex].answer = answer;
 		this.sendAll(buildMessage(GameMessage.PlayerAnswer, playerIndex, answer));
 		this.sendTo(managerName, buildMessage(GameMessage.AskValidate, playerIndex, answer, '+'));
+
+		// A manager that is a player (the server drives the showman seat) does not get the validation
+		// buttons of the showman, so the decision must not wait for them forever
+		if (manager.role !== PersonRole.Showman) {
+			this.scheduleValidationTimeout(playerIndex, answer);
+		}
+	}
+
+	/** Gives the manager some time to check the answer; after that the answer is checked automatically. */
+	private scheduleValidationTimeout(playerIndex: number, answer: string): void {
+		this.answersToValidate.set(playerIndex, Date.now());
+
+		this.schedule(ORAL_VALIDATION_TIMEOUT, () => {
+			if (!this.answersToValidate.has(playerIndex)) {
+				return;
+			}
+
+			if (!this.session.isQuestionPlaying || this.session.isQuestionAnswerShown) {
+				this.answersToValidate.delete(playerIndex);
+				return;
+			}
+
+			this.answersToValidate.delete(playerIndex);
+			this.validateAnswer(playerIndex, answer, this.isAnswerRight(answer));
+		});
 	}
 
 	private handleAnswerVersion(sender: string, answer: string): void {
@@ -1578,6 +1610,7 @@ export class Game {
 
 		session.players[playerIndex].answer = answer;
 		this.answeredPlayers.add(playerIndex);
+		this.answersToValidate.delete(playerIndex);
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 
 		if (isRight) {

@@ -764,6 +764,20 @@ export default class ClientController implements IClientController {
 	}
 
 	onInfo(all: Persons, showman: PersonInfo, players: PlayerInfo[]) {
+		// Avatars come as separate messages, so the ones that are already known are kept:
+		// otherwise every `INFO2` (each join, leave or score change) would clear them from the cards
+		Object.values(all).forEach(person => {
+			const known = this.getState().room2.persons.all[person.name];
+
+			if (known?.avatar && !person.avatar) {
+				person.avatar = known.avatar;
+			}
+
+			if (known?.avatarVideo && !person.avatarVideo) {
+				person.avatarVideo = known.avatarVideo;
+			}
+		});
+
 		this.appDispatch(infoChanged({ all, showman, players }));
 
 		if (showman.name) {

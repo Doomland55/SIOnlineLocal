@@ -80,9 +80,10 @@ async function uploadAvatarAsync(appDispatch: AppDispatch, dataContext: DataCont
 
 		const uploadedUri = await contentClient.uploadAvatarIfNotExistAsync(fileName, new Blob([buffer]));
 
-		// Relative avatar links must be resolved against the service, absolute (data:) links are used as is
+		// Relative avatar links must be resolved against the service, absolute (data:) links are used as is.
+		// The service uri could have no trailing slash, so the parts are joined with exactly one slash
 		const fullAvatarUri2 = uploadedUri.startsWith('/')
-			? contentClient.options.serviceUri + uploadedUri.substring(1)
+			? `${contentClient.options.serviceUri.replace(/\/+$/, '')}/${uploadedUri.replace(/^\/+/, '')}`
 			: uploadedUri;
 
 		appDispatch(avatarLoadEnd());

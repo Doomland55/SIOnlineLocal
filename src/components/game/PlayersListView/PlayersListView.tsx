@@ -48,7 +48,10 @@ export function PlayersListView(props: PlayersListViewProps): JSX.Element {
 				const isMe = player.name === name;
 				const avatarClass = getAvatarClass(account);
 
-				const avatar = isMe && props.avatar ? props.avatar : account?.avatar;
+				// The avatar chosen by this player is applied to their own card as well
+				const avatar = isMe
+					? props.avatar ?? account?.avatar ?? null
+					: account?.avatar ?? null;
 
 				const avatarStyle : React.CSSProperties = avatar
 					? { backgroundImage: `url("${avatar}")` }

@@ -60,11 +60,8 @@ function renderBody(
 			break;
 
 		case DecisionType.Validation:
-			if (role === Role.Player) {
-				return <AnswerValidationButtons />;
-			} else {
-				return <div className='oral__answer'>{localization.validateAnswer}</div>;
-			}
+			// Both the player (appeal) and the showman (oral game) decide whether the answer is right
+			return <AnswerValidationButtons />;
 
 		case DecisionType.Review:
 			return <ReportPanel />;
