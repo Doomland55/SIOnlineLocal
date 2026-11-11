@@ -140,6 +140,43 @@ async function initializeStoragesAsync(appDispatch: AppDispatch, dataContext: Da
 	appDispatch(setStorages(storageInfos));
 }
 
+const SAME_ORIGIN_PROBE_TIMEOUT_MS = 3000;
+
+/**
+ * Detects a SIGame server served from the same origin as the client.
+ *
+ * A locally started server hosts both the web client and the API, so players
+ * just open http://<host>:<port>/ in a browser and must be connected to that
+ * very server instead of the ones from the public discovery list.
+ */
+async function hasSameOriginGameServerAsync(): Promise<boolean> {
+	if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+		return false;
+	}
+
+	const abortController = new AbortController();
+	const timeoutId = globalThis.setTimeout(() => abortController.abort(), SAME_ORIGIN_PROBE_TIMEOUT_MS);
+
+	try {
+		const response = await fetch('/api/v1/info/host', {
+			signal: abortController.signal,
+			headers: { Accept: 'application/json' },
+		});
+
+		if (!response.ok) {
+			return false;
+		}
+
+		// Single page application servers answer unknown paths with index.html,
+		// so the content type is what tells a real game server apart.
+		return (response.headers.get('content-type') || '').includes('json');
+	} catch {
+		return false;
+	} finally {
+		globalThis.clearTimeout(timeoutId);
+	}
+}
+
 let serverInfoPromise: Promise<void> | null = null;
 
 export function ensureServerInfoLoadedAsync(
@@ -167,9 +204,21 @@ async function loadServerInfoAsync(
 		await initializeStoragesAsync(appDispatch, dataContext, []);
 	}
 
-	const { serverDiscoveryUri } = dataContext.config;
+	const { serverDiscoveryUri, serverUri: configuredServerUri } = dataContext.config;
 
-	if (serverDiscoveryUri) {
+	// An explicit server uri skips the discovery step entirely (used by the
+	// local server and by custom deployments).
+	if (configuredServerUri) {
+		const uri = configuredServerUri.replace(/\/+$/, '');
+		dataContext.serverUri = uri;
+		dataContext.gameClient.setServerUri(uri);
+		appDispatch(setProxyAvailable(false));
+	} else if (await hasSameOriginGameServerAsync()) {
+		// Served by a local server: keep using the current origin.
+		dataContext.serverUri = '';
+		dataContext.gameClient.setServerUri('');
+		appDispatch(setProxyAvailable(false));
+	} else if (serverDiscoveryUri) {
 		try {
 			const { uri, proxyUri: serverProxyUri } = await getServerInfo(serverDiscoveryUri);
 			dataContext.serverUri = uri;

@@ -12,6 +12,8 @@
     "build-lib-player": "webpack --mode production --env type=library-player",
     "build-lib-quest": "webpack --mode production --env type=library-quest",
     "start": "webpack serve --mode development",
+    "server": "node server/cli.js",
+    "test:server": "node server/test/smoke.js",
     "test": "jest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",

@@ -98,6 +98,11 @@ function getPackageKey(info: PackageInfo): string {
 }
 
 async function loadStatisticsAsync(dispatch: AppDispatch, dataContext: DataContext) {
+	if (!dataContext.config.siStatisticsServiceUri) {
+		// Local and offline servers have no statistics service.
+		return;
+	}
+
 	const siStatisticsClient = new SIStatisticsClient({ serviceUri: dataContext.config.siStatisticsServiceUri });
 
 	const now = new Date();

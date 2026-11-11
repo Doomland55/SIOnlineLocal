@@ -267,3 +267,6 @@ test-screenshots/
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# Local SIGame server data (uploaded packages and avatars)
+/server/data/

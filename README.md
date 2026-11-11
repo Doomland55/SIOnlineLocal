@@ -22,6 +22,27 @@ npm install
 npm run build-prod
 ```
 
+# Running your own game server (LAN play)
+
+The repository includes a self-contained game server (Node.js only, no extra
+dependencies) that hosts both the web client and the game API, so players do not
+need internet access or any external server:
+
+```
+npm install
+npm run build-prod
+npm run server
+```
+
+The console prints the addresses to share, e.g. `http://192.168.1.42:8080/`.
+Players open that address in a browser, the host uploads a `.siq` package and
+starts the game; questions and their images, audio and video are downloaded from
+the same server, and a question does not start until every player has reported
+its media as loaded.
+
+See [server/README.md](server/README.md) for options, the HTTP API, the media
+synchronisation details and troubleshooting.
+
 # Testing
 
 SIOnline includes multiple testing approaches:
