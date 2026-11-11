@@ -97,6 +97,93 @@ function sanitizeFileName(fileName) {
 	return baseName.replace(/[\u0000-\u001f<>:"|?*]/g, '_').substring(0, 200) || 'file';
 }
 
+/** decodeURIComponent that never throws on malformed input. */
+function safeDecode(value) {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		return value;
+	}
+}
+
+/**
+ * Normalizes a media name received from content.xml or from an URL.
+ *
+ * Packages built on Windows store backslashes, and some editors url-encode the
+ * names inside content.xml, so the raw value cannot be used as a map key.
+ */
+function normalizeMediaName(fileName) {
+	const value = safeDecode(String(fileName || '').replace(/\\/g, '/'));
+
+	return value.replace(/^\/+/, '');
+}
+
+/**
+ * Encodes a media name for an URL, keeping the directory separators.
+ *
+ * Encoding the whole name would turn "/" into "%2F", which some proxies and
+ * servers reject or normalize, so every path segment is encoded separately.
+ */
+function encodeMediaPath(fileName) {
+	return normalizeMediaName(fileName).split('/').map(encodeURIComponent).join('/');
+}
+
+/**
+ * Finds the real key of a media file inside a parsed package.
+ *
+ * The name in content.xml does not always match the archive entry byte by byte:
+ * it may differ in letter case (Windows editors), use backslashes, or be stored
+ * in a different Unicode normalization form (macOS). A permissive lookup makes
+ * such packages playable instead of leaving clients with a never-ending
+ * spinner on a file that cannot be downloaded.
+ *
+ * @returns {string|null} Key in the package file map or null when absent.
+ */
+function findMediaKey(files, fileName) {
+	if (!files || !fileName) {
+		return null;
+	}
+
+	const normalized = normalizeMediaName(fileName);
+
+	if (!normalized) {
+		return null;
+	}
+
+	const candidates = [normalized];
+
+	try {
+		candidates.push(normalized.normalize('NFC'));
+	} catch {
+		// Old Node versions or exotic names: skip normalization.
+	}
+
+	for (const candidate of candidates) {
+		if (files.has(candidate)) {
+			return candidate;
+		}
+	}
+
+	const fullNames = new Set(candidates.map(candidate => candidate.toLowerCase()));
+	const baseNames = new Set(candidates.map(candidate => candidate.split('/').pop().toLowerCase()));
+
+	let baseNameMatch = null;
+
+	for (const key of files.keys()) {
+		const normalizedKey = String(key).replace(/\\/g, '/');
+
+		if (fullNames.has(normalizedKey.toLowerCase())) {
+			return key;
+		}
+
+		if (!baseNameMatch && baseNames.has(normalizedKey.split('/').pop().toLowerCase())) {
+			baseNameMatch = key;
+		}
+	}
+
+	return baseNameMatch;
+}
+
 class ContentService {
 	/**
 	 * @param {{dataDir: string, log?: Function}} options
@@ -134,7 +221,7 @@ class ContentService {
 	 * the host machine's IP addresses (or host names) players used to join.
 	 */
 	getMediaUri(packageHash, fileName) {
-		return `<SERVERHOST>/media/${packageHash}/${encodeURIComponent(fileName)}`;
+		return `<SERVERHOST>/media/${packageHash}/${encodeMediaPath(fileName)}`;
 	}
 
 	/** Relative package uri, as returned by SIContentService. */
@@ -194,14 +281,16 @@ class ContentService {
 	/** Serves a media file from a registered package. */
 	serveMedia(req, res, packageHash, fileName) {
 		const parsedPackage = this.packages.get(packageHash);
-		const data = parsedPackage ? parsedPackage.files.get(fileName) : undefined;
+		const key = parsedPackage ? findMediaKey(parsedPackage.files, fileName) : null;
+		const data = key ? parsedPackage.files.get(key) : undefined;
 
 		if (!data) {
+			this.log(`Media "${fileName}" is not found in package ${packageHash}`);
 			this.sendNotFound(res);
 			return;
 		}
 
-		this.sendBuffer(req, res, data, getMimeType(fileName), `${packageHash}:${fileName}`);
+		this.sendBuffer(req, res, data, getMimeType(key), `${packageHash}:${key}`);
 	}
 
 	/** Answers "does this file exist" with its relative uri, as SIContent does. */
@@ -405,10 +494,11 @@ class ContentService {
 			return true;
 		}
 
-		// In-package media (images, audio, video, html).
-		const mediaMatch = /^\/media\/([^/]+)\/([^/]+)$/.exec(pathname);
+		// In-package media (images, audio, video, html). A media name may contain
+		// directory separators, so everything after the package hash is the name.
+		const mediaMatch = /^\/media\/([^/]+)\/(.+)$/.exec(pathname);
 		if (mediaMatch) {
-			this.serveMedia(req, res, decodeURIComponent(mediaMatch[1]), decodeURIComponent(mediaMatch[2]));
+			this.serveMedia(req, res, decodeURIComponent(mediaMatch[1]), safeDecode(mediaMatch[2]));
 			return true;
 		}
 
@@ -570,6 +660,9 @@ function readRequestBody(req, limit) {
 module.exports = {
 	ContentService,
 	computeContentHash,
+	encodeMediaPath,
+	findMediaKey,
+	normalizeMediaName,
 	parseMultipart,
 	readRequestBody,
 	sanitizeFileName,

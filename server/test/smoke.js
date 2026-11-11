@@ -268,8 +268,12 @@ async function buildPackage() {
 
 	zip.file('Images/pixel.png', png);
 
+	// Real packages reference media names in a different letter case, with
+	// spaces and cyrillic letters. The server must find such files anyway.
+	zip.file('Images/Логотип пака.png', png);
+
 	zip.file('content.xml', `<?xml version="1.0" encoding="utf-8"?>
-<package name="Тестовый пакет" version="5" id="1" date="2024-01-01" publisher="local" language="ru" logo="Images/pixel.png">
+<package name="Тестовый пакет" version="5" id="1" date="2024-01-01" publisher="local" language="ru" logo="images/ЛОГОТИП ПАКА.png">
 	<info>
 		<authors><author>Локальный сервер</author></authors>
 		<sources><source>Автотест</source></sources>
@@ -460,6 +464,21 @@ async function main() {
 		const ranged = await fetch(mediaUrl, { headers: { Range: 'bytes=0-3' } });
 		assert.strictEqual(ranged.status, 206, 'range request must return 206');
 		assert.match(ranged.headers.get('content-range') || '', /^bytes 0-3\/\d+$/, 'partial content range is returned');
+
+		// Media with directories, spaces and cyrillic letters is addressable
+		// with plain path separators and with percent-encoded ones.
+		const plainPathUrl = `${baseUrl}/media/${packageHash}/Images/${encodeURIComponent('Логотип пака.png')}`;
+		const plainPathResponse = await fetch(plainPathUrl);
+		assert.strictEqual(plainPathResponse.status, 200, 'media in a subdirectory must be served');
+		assert.strictEqual(plainPathResponse.headers.get('content-type'), 'image/png');
+
+		const encodedPathResponse = await fetch(
+			`${baseUrl}/media/${packageHash}/${encodeURIComponent('Images/логотип ПАКА.png')}`
+		);
+		assert.strictEqual(encodedPathResponse.status, 200, 'media names are matched case-insensitively');
+
+		const missingResponse = await fetch(`${baseUrl}/media/${packageHash}/absent.png`);
+		assert.strictEqual(missingResponse.status, 404, 'missing media is reported as 404');
 		console.log('✔ media streaming with Range support');
 
 		// The lobby reports free seats (IsOnline: false). The web client enables
@@ -530,6 +549,20 @@ async function main() {
 		const packageInfoMessage = await player1.waitForStart('PACKAGE', 3000);
 		assert.ok(packageInfoMessage.includes('Тестовый пакет'), 'package name must be announced');
 
+		// The client decides whether it may start the game, move to the next
+		// round and edit the scores by comparing its own name with HOSTNAME.
+		// Without this message the showman has no host rights at all.
+		const hostNameMessage = await player1.waitForStart('HOSTNAME', 3000);
+		assert.strictEqual(hostNameMessage.split('\n')[1], 'Ведущий', 'the game creator is reported as the host');
+
+		// The package logo is sent only when the file is really inside the
+		// archive, otherwise the client waits forever for a broken image.
+		const logoLine = packageInfoMessage.split('\n');
+		assert.strictEqual(logoLine.length > 3, true, 'package logo uri is sent');
+		assert.ok(/^<SERVERHOST>\/media\//.test(logoLine[3]), `unexpected logo uri: ${logoLine[3]}`);
+		const logoResponse = await fetch(`${baseUrl}${logoLine[3].replace('<SERVERHOST>', '')}`);
+		assert.strictEqual(logoResponse.status, 200, 'the announced package logo must be downloadable');
+
 		// Duplicate name must be rejected.
 		const duplicate = await new TestClient(baseUrl, 'Игрок 1').connect();
 		const duplicateJoin = await duplicate.invoke('JoinGame2', {
@@ -594,6 +627,30 @@ async function main() {
 		const sums = await player1.waitForStart('SUMS', 3000, afterValidation);
 		assert.deepStrictEqual(sums.split('\n').slice(1), ['0', '100'], 'sums are broadcast');
 
+		// The showman can correct a player score (CHANGE, player number from 1).
+		const afterScores = player1.mark();
+		showman.send('CHANGE\n2\n250');
+
+		const scoreChanged = await player1.waitForStart('PLAYER_SCORE_CHANGED', 3000, afterScores);
+		assert.deepStrictEqual(
+			scoreChanged.split('\n').slice(1),
+			['1', '250'],
+			'the score change is broadcast with a zero-based player index',
+		);
+
+		const sumsAfterChange = await player1.waitForStart('SUMS', 3000, afterScores);
+		assert.deepStrictEqual(sumsAfterChange.split('\n').slice(1), ['0', '250'], 'sums follow the manual change');
+
+		// A player must not be able to rewrite the scores.
+		const afterIllegalChange = player1.mark();
+		player1.send('CHANGE\n1\n9999');
+		await delay(300);
+		assert.ok(
+			!player1.messages.slice(afterIllegalChange).some(text => text.startsWith('PLAYER_SCORE_CHANGED')),
+			'players cannot change scores',
+		);
+		console.log('✔ showman changes scores, players cannot');
+
 		const afterQuestion = player1.mark();
 		await player1.waitForStart('QUESTION_END', 6000, afterQuestion);
 		console.log('✔ press order, answer, showman validation, scores');
@@ -607,6 +664,16 @@ async function main() {
 
 		const secondQuestion = nextPlayer.mark();
 		await nextPlayer.waitForStart('TRY', 5000, secondQuestion);
+
+		// A player may pass: everybody is told, and the question continues for
+		// the players who can still press.
+		const otherPlayerIndex = chooserIndex === '1' ? 0 : 1;
+		const otherPlayer = otherPlayerIndex === 0 ? player1 : player2;
+		otherPlayer.send('PASS');
+
+		const passMessage = await nextPlayer.waitForStart('PASS', 3000, secondQuestion);
+		assert.strictEqual(passMessage.split('\n')[1], String(otherPlayerIndex), 'the passed player is announced');
+
 		nextPlayer.send('I\n10');
 		await nextPlayer.waitForStart('ANSWER', 3000, secondQuestion);
 		nextPlayer.send('ANSWER\nневерно');

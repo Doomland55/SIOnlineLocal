@@ -1035,9 +1035,13 @@ export default class ClientController implements IClientController {
 		if (packageLogo) {
 			this.appDispatch(captionChanged(localization.package));
 
+			// The server sends the logo with the <SERVERHOST> placeholder, and
+			// only onContent() replaces it. Without this the image is requested
+			// from a relative "<SERVERHOST>/media/..." uri, never loads and the
+			// table shows a spinner forever.
 			this.onContent('screen', [{
 				type: 'image',
-				value: packageLogo
+				value: this.preprocessServerUri(packageLogo)
 			}, {
 				type: 'text',
 				value: packageName

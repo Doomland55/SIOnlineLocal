@@ -21,7 +21,7 @@
  */
 
 const { QuestionTypes, getTextContent } = require('./package');
-const { computeContentHash } = require('./content');
+const { computeContentHash, findMediaKey } = require('./content');
 
 const ROLE_SHOWMAN = 'showman';
 const ROLE_PLAYER = 'player';
@@ -134,7 +134,12 @@ class Game {
 		this.realStartTime = null;
 
 		this.joinMode = 0; // 0 = any role, 1 = viewer only, 2 = forbidden
-		this.hostName = null;
+
+		// The creator of the game is the host, exactly like in the reference SI
+		// server. The host rights (starting the game, moving to the next round,
+		// editing the scores) are decided by the client with the HOSTNAME
+		// message, so it must never stay null.
+		this.hostName = this.owner || null;
 
 		this.showman = this.createShowmanSeat();
 		this.players = this.createPlayerSeats();
@@ -345,10 +350,15 @@ class Game {
 		};
 	}
 
+	/** Sends the current scores of all players. */
+	broadcastSums() {
+		this.broadcastLines(['SUMS', ...this.players.map(player => String(player.sum))]);
+	}
+
 	/** Re-sends the person list and scores to everybody (used when a seat appears). */
 	broadcastInfoAndSums() {
 		this.broadcast(this.infoLines().join('\n'));
-		this.broadcast(['SUMS', ...this.players.map(player => String(player.sum))].join('\n'));
+		this.broadcastSums();
 	}
 
 	removeClient(clientId) {
@@ -484,10 +494,14 @@ class Game {
 
 		lines.push(this.infoLines());
 		lines.push(['SETJOINMODE', String(this.joinMode), '+']);
+		lines.push(['HOSTNAME', this.hostName || '']);
 
 		if (this.parsedPackage) {
-			const logoUri = this.parsedPackage.logo
-				? this.contentService.getMediaUri(this.parsedPackage.hash, this.parsedPackage.logo)
+			const logoKey = this.parsedPackage.logo
+				? findMediaKey(this.parsedPackage.files, this.parsedPackage.logo)
+				: null;
+			const logoUri = logoKey
+				? this.contentService.getMediaUri(this.parsedPackage.hash, logoKey)
 				: '';
 
 			lines.push(['PACKAGE', this.parsedPackage.name, '-', logoUri]);
@@ -1066,12 +1080,14 @@ class Game {
 			return fileName;
 		}
 
-		if (!parsedPackage.files.has(fileName)) {
+		const mediaKey = findMediaKey(parsedPackage.files, fileName);
+
+		if (!mediaKey) {
 			this.log(`Package ${parsedPackage.name} does not contain ${fileName}`);
 			return '';
 		}
 
-		return this.contentService.getMediaUri(parsedPackage.hash, fileName);
+		return this.contentService.getMediaUri(parsedPackage.hash, mediaKey);
 	}
 
 	// ------------------------------------------------------------ media wait
@@ -1177,7 +1193,7 @@ class Game {
 
 		const player = this.players[client.index];
 
-		if (!player || player.answered || player.pressedAt !== null) {
+		if (!player || player.answered || player.hasPassed || player.pressedAt !== null) {
 			return;
 		}
 
@@ -1442,7 +1458,7 @@ class Game {
 		}
 
 		this.broadcastLines(['PERSON', isRight ? '+' : '-', String(playerIndex), String(player.sum)]);
-		this.broadcastLines(['SUMS', ...this.players.map(item => String(item.sum))]);
+		this.broadcastSums();
 		this.onChanged(this);
 
 		if (options.suppressFinish) {
@@ -1833,7 +1849,7 @@ class Game {
 			this.broadcastLines(['PERSON', isRight ? '+' : '-', String(playerIndex), String(player.sum)]);
 		}
 
-		this.broadcastLines(['SUMS', ...this.players.map(player => String(player.sum))]);
+		this.broadcastSums();
 		this.revealAnswer();
 		this.delay(4000, () => this.finishQuestion());
 	}
@@ -1907,7 +1923,7 @@ class Game {
 		this.questionLog = [];
 
 		this.broadcastLines(['STOP']);
-		this.broadcastLines(['SUMS', ...this.players.map(player => String(player.sum))]);
+		this.broadcastSums();
 
 		this.resetPlayerRoundState();
 
@@ -1931,7 +1947,7 @@ class Game {
 		this.currentQuestion = null;
 
 		this.broadcastLines(['STAGE', STAGE.After, this.name, String(this.parsedPackage ? this.parsedPackage.rounds.length : 0), '']);
-		this.broadcastLines(['SUMS', ...this.players.map(player => String(player.sum))]);
+		this.broadcastSums();
 
 		const winnerIndex = this.getWinnerIndex();
 		if (winnerIndex >= 0) {
@@ -1988,6 +2004,7 @@ class Game {
 			player.answer = '';
 			player.answered = false;
 			player.pressedAt = null;
+			player.hasPassed = false;
 		}
 
 		const indices = this.players.map((_, index) => index);
@@ -2049,6 +2066,10 @@ class Game {
 				this.onPlayerAnswer(clientId, args[1] || '');
 				break;
 
+			case 'PASS':
+				this.handlePass(client);
+				break;
+
 			case 'ISRIGHT':
 				this.handleValidationResult(clientId, args[1] === '+', args[2]);
 				break;
@@ -2090,6 +2111,10 @@ class Game {
 
 			case 'MOVE':
 				this.handleMove(client, args);
+				break;
+
+			case 'CHANGE':
+				this.handleChange(client, args);
 				break;
 
 			case 'TOGGLE':
@@ -2170,7 +2195,85 @@ class Game {
 		}
 	}
 
+	/** Tells everybody that a player cannot press the button any more. */
+	handlePass(client) {
+		if (client.role !== ROLE_PLAYER || (this.phase !== 'press' && this.phase !== 'answering')) {
+			return;
+		}
+
+		const player = this.players[client.index];
+
+		if (!player || player.answered || player.hasPassed) {
+			return;
+		}
+
+		player.hasPassed = true;
+		player.pressedAt = null;
+
+		if (this.currentQuestion && this.currentQuestion.presses) {
+			this.currentQuestion.presses = this.currentQuestion.presses.filter(press => press.index !== client.index);
+		}
+
+		// PASS <player index> is the message the client understands (PASS is
+		// also a request, but the answer for it is the same message).
+		this.broadcastLines(['PASS', String(client.index)]);
+
+		// Nobody can press any more: finish the press phase right away instead
+		// of waiting for the timer.
+		if (this.phase === 'press' && this.pressState) {
+			const canStillPress = this.players.some(seat => seat.clientId && !seat.answered && !seat.hasPassed);
+
+			if (!canStillPress) {
+				this.stopTimer(1);
+				this.resolvePresses();
+			}
+		}
+	}
+
+	/**
+	 * Changes a player score on behalf of the showman (CHANGE message).
+	 *
+	 * The format matches the reference SI server: CHANGE, <player number
+	 * starting from 1>, <new sum>. Everybody receives PLAYER_SCORE_CHANGED with
+	 * a zero-based player index plus the new sums, so all clients stay in sync.
+	 */
+	handleChange(client, args) {
+		// The reference server trusts only the showman, but the client shows the
+		// score editor to the host, so the host is accepted too.
+		if (client.role !== ROLE_SHOWMAN && client.name !== this.hostName) {
+			return;
+		}
+
+		if (args.length < 3) {
+			return;
+		}
+
+		const playerNumber = Number(args[1]);
+		const sum = Number(args[2]);
+
+		if (!Number.isInteger(playerNumber) || !Number.isInteger(sum)) {
+			return;
+		}
+
+		const playerIndex = playerNumber - 1;
+		const player = this.players[playerIndex];
+
+		if (!player) {
+			return;
+		}
+
+		player.sum = sum;
+
+		this.broadcastLines(['PLAYER_SCORE_CHANGED', String(playerIndex), String(sum)]);
+		this.broadcastSums();
+		this.log(`Sum change: ${playerIndex} = ${sum}`);
+	}
+
 	handleMove(client, args) {
+		if (client.role !== ROLE_SHOWMAN && client.name !== this.hostName) {
+			return;
+		}
+
 		// MOVE 1 = next (showman), MOVE 3 = move to round index.
 		if (args[1] === '3') {
 			const roundIndex = Number(args[2]);
@@ -2186,8 +2289,25 @@ class Game {
 			return;
 		}
 
+		// A question is being read or played: "next" skips it and returns to
+		// the table, exactly like the reference server does on MOVE Next.
+		if (this.currentQuestion) {
+			this.log('Question skipped by the showman');
+			this.cancelPendingDelay();
+			this.finishQuestion();
+			return;
+		}
+
 		if (this.phase === 'choosing' || this.phase === 'betweenQuestions') {
 			this.endRound('manual');
+		}
+	}
+
+	/** Cancels a scheduled action (used when the showman interrupts the flow). */
+	cancelPendingDelay() {
+		if (this.startDelayTimer) {
+			clearTimeout(this.startDelayTimer);
+			this.startDelayTimer = null;
 		}
 	}
 

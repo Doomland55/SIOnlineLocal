@@ -46,6 +46,15 @@ const ImageContent: React.FC<ImageContentProps> = ({ uri }) => {
 		spinnerRef.current.style.display = 'none';
 	}, [appDispatch]);
 
+	// A missing or broken image must not leave the client waiting forever: the
+	// game is only continued when the client reports the media as loaded, so an
+	// error is reported in the same way as a successful load (and the spinner
+	// is hidden). Otherwise one broken file in a package would freeze the game.
+	const handleImageError = React.useCallback(() => {
+		console.warn('Image could not be loaded:', uri);
+		handleImageLoad();
+	}, [handleImageLoad, uri]);
+
 	const isTimerRunning = isRunning(loadTimer);
 	const animatingClass = isTimerRunning ? ' animate' : '';
 	const animationDuration = `${(loadTimer.maximum - loadTimer.value) * partialImageTime}s`;
@@ -77,7 +86,15 @@ const ImageContent: React.FC<ImageContentProps> = ({ uri }) => {
 	return (
 		<div className='image-host'>
 			<img alt='spinner' className="spinnerImg" ref={spinnerRef} src={spinnerSvg} />
-			<img alt='image' className={`inGameImg${animatingClass}`} style={cropStyle} ref={imageRef} src={uri} onLoad={handleImageLoad} />
+			<img
+				alt='image'
+				className={`inGameImg${animatingClass}`}
+				style={cropStyle}
+				ref={imageRef}
+				src={uri}
+				onLoad={handleImageLoad}
+				onError={handleImageError}
+			/>
 		</div>
 	);
 };
