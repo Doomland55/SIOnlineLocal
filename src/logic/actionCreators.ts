@@ -68,6 +68,8 @@ async function uploadAvatarAsync(appDispatch: AppDispatch, dataContext: DataCont
 		const { contentClients } = dataContext;
 
 		if (!contentClients || contentClients.length === 0) {
+			// The local server has no separate content service: the avatar could still be uploaded
+			// to the server itself. If that is not possible, the avatar stays local.
 			console.log('No SIContent service available for avatar upload');
 			appDispatch(avatarLoadEnd());
 			return;
@@ -76,11 +78,12 @@ async function uploadAvatarAsync(appDispatch: AppDispatch, dataContext: DataCont
 		const contentIndex = Math.floor(Math.random() * contentClients.length);
 		const contentClient = contentClients[contentIndex];
 
-		const avatarUri2 = await contentClient.uploadAvatarIfNotExistAsync(fileName, new Blob([buffer]));
+		const uploadedUri = await contentClient.uploadAvatarIfNotExistAsync(fileName, new Blob([buffer]));
 
-		const fullAvatarUri2 = avatarUri2.startsWith('/')
-			? contentClient.options.serviceUri + avatarUri2.substring(1)
-			: avatarUri2;
+		// Relative avatar links must be resolved against the service, absolute (data:) links are used as is
+		const fullAvatarUri2 = uploadedUri.startsWith('/')
+			? contentClient.options.serviceUri + uploadedUri.substring(1)
+			: uploadedUri;
 
 		appDispatch(avatarLoadEnd());
 		appDispatch(changeAvatar(fullAvatarUri2));
@@ -112,8 +115,12 @@ const onAvatarSelectedLocal: ActionCreator<ThunkAction<void, State, DataContext,
 
 			const state = getState();
 
-			if (state.ui.navigation.path === Path.Room && state.user.avatar) {
-				await dataContext.game.sendImageAvatar(state.user.avatar);
+			if (state.ui.navigation.path === Path.Room) {
+				// Without a content service the avatar is sent as a data url: the local server
+				// relays it to the other clients of the game, so the avatars stay in sync
+				const avatarUri = state.user.avatar ?? `data:image/png;base64,${base64}`;
+
+				await dataContext.game.sendImageAvatar(avatarUri);
 			}
 		} catch (error) {
 			appDispatch(userErrorChanged(getErrorMessage(error)) as any);

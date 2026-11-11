@@ -7,6 +7,8 @@ import JoinGame2Result from './contracts/JoinGame2Result';
 import JoinGameRequest from './contracts/JoinGameRequest';
 import ServerRole from './contracts/ServerRole';
 import DefaultEndpoints from './system/DefaultEndpoints';
+import Messages from './game/Messages';
+import Constants from '../model/enums/Constants';
 
 export class ReconnectError extends Error {
 	constructor(public result: JoinGame2Result) {
@@ -157,6 +159,7 @@ export default class SIHostClient implements ISIHostClient {
 		if (result === JoinGame2Result.Success) {
 			this.joinInfo = joinGameRequest;
 			this.userName = joinGameRequest.UserName;
+			this.sendStoredAvatar();
 		}
 
 		return result;
@@ -236,6 +239,19 @@ export default class SIHostClient implements ISIHostClient {
 		});
 	}
 
+	/**
+	 * Sends the avatar stored in the browser to the game server.
+	 * The upload to a content service is asynchronous, so the avatar could be ready only after the join:
+	 * sending it right after the join makes the avatars visible to the other clients.
+	 */
+	private sendStoredAvatar(): void {
+		const avatar = typeof localStorage !== 'undefined' ? localStorage.getItem(Constants.AVATAR_KEY) : null;
+
+		if (avatar) {
+			void this.sendMessageToServerAsync(`${Messages.Avatar}\nimage\ndata:image/png;base64,${avatar}`);
+		}
+	}
+
 	async reconnectAsync(): Promise<any> {
 		if (this.joinInfo) {
 			const result = await this.joinGameAsync(this.joinInfo);
@@ -243,6 +259,8 @@ export default class SIHostClient implements ISIHostClient {
 			if (result !== JoinGame2Result.Success) {
 				throw new ReconnectError(result);
 			}
+
+			this.sendStoredAvatar();
 		}
 	}
 

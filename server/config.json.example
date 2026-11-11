@@ -8,6 +8,7 @@
 	"clientDir": "dist",
 	"maxPackageSizeMb": 512,
 	"botNames": ["Иннокентий", "Александра", "Борис", "Василиса", "Григорий", "Дарья"],
+	"startupGames": false,
 	"timeSettings": {
 		"timeForChoosingQuestion": 60,
 		"timeForThinkingOnQuestion": 30,

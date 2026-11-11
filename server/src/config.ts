@@ -54,6 +54,12 @@ export interface LocalServerConfig {
 	/** Bot accounts that can fill empty player slots. */
 	botNames: string[];
 
+	/**
+	 * Create a lobby game for every package on the server start (disabled by default).
+	 * When disabled, the lobby stays empty and games are created from the client.
+	 */
+	startupGames: boolean;
+
 	/** License text that players accept before joining. */
 	license: string;
 }
@@ -177,6 +183,7 @@ export function loadConfig(configPath: string | null = null): LocalServerConfig 
 		maxPackageSizeMb: numberOr(fileConfig.maxPackageSizeMb, 512),
 		timeSettings: { ...DEFAULT_TIME_SETTINGS, ...(fileConfig.timeSettings ?? {}) },
 		botNames: fileConfig.botNames ?? DEFAULT_BOTS,
+		startupGames: fileConfig.startupGames === true,
 		license: fileConfig.license ?? 'This game is played for fun. Be kind to each other.',
 	};
 }

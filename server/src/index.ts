@@ -127,12 +127,11 @@ async function main() {
 
 	if (packages.length === 0) {
 		log('Пакеты не найдены. Положите файлы .siq в каталог packages или загрузите пакет через веб-клиент.');
-	} else {
-		// Create a game for every package so that players can join right after the server start
+	} else if (config.startupGames) {
+		// Optional: create a game for every package so that players can join right after the server start.
+		// Games created from the client are the usual way, so this is disabled in the default config
 		for (const pack of packages) {
-			const playerName = config.botNames.length > 0 ? 'Ведущий' : 'Ведущий';
-			lobby.createGame(pack, pack.package.name, playerName, []);
-			void playerName;
+			lobby.createGame(pack, pack.package.name, 'Ведущий', []);
 		}
 
 		log(`Создано игр: ${lobby.getGames().length}. Пин-код игры: /api/v1/games/list`);

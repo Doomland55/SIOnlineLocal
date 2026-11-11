@@ -360,3 +360,81 @@ describe('Game engine', () => {
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 });
+
+describe('Game rules in the middle of a game', () => {
+	let dir: string;
+	let lobby: Lobby;
+	let game: Game;
+	let messages: string[];
+
+	/** Sends a message to the game and collects everything the clients receive. */
+	function send(playerName: string, text: string): void {
+		game.handleClientMessage(playerName, text);
+	}
+
+	beforeAll(async () => {
+		dir = createTempDir();
+		const filePath = await createPackage(dir);
+		const library = new PackageLibrary(path.dirname(filePath), path.join(dir, 'media'), () => { });
+		const loaded = await loadPackage(filePath, 'test.siq', path.join(dir, 'media'));
+
+		lobby = new Lobby(
+			library,
+			{
+				publicBaseUrl: 'http://localhost:8080',
+				serverName: 'test',
+				defaultShowmanName: 'Ведущий',
+				language: 'ru-RU',
+				botNames: [],
+				log: () => { },
+			},
+			path.join(dir, 'uploads'),
+		);
+
+		game = lobby.createGame(loaded, 'Игра', 'Ведущий', ['Игрок'], false, 0);
+	});
+
+	beforeEach(() => {
+		messages = [];
+
+		game.session.players[0].name = 'Игрок';
+		game.session.players[0].isHuman = true;
+
+		game.attachConnection('Игрок', {
+			send: (target: string, ...args: unknown[]) => {
+				const [message] = args as [{ Text?: string }];
+
+				if (target === 'Receive' && message?.Text) {
+					messages.push(message.Text);
+				}
+			},
+			sendClose: () => { },
+		}, 'http://192.168.1.10:8080');
+	});
+
+	it('sends the blocking button time under the name the client knows', () => {
+		// The client handles `ButtonBlocking`, while the option is called `TimeForBlockingButton` in the api
+		send('Игрок', 'SET_OPTIONS\nTimeForBlockingButton\n7');
+
+		expect(messages.some(text => text === 'OPTIONS2\nИгрок\nButtonBlocking\n7')).toBe(true);
+		expect(messages.some(text => text.includes('TimeForBlockingButton'))).toBe(false);
+	});
+
+	it('sends the partial image time and appellations under the client names', () => {
+		send('Игрок', 'SET_OPTIONS\nPartialImageTime\n4');
+		send('Игрок', 'SET_OPTIONS\nUseApellations\ntrue');
+
+		expect(messages.some(text => text.includes('PartialImage\n4'))).toBe(true);
+		expect(messages.some(text => text.includes('UseAppellations\ntrue'))).toBe(true);
+	});
+
+	it('keeps every theme of the round and hides the played question only', () => {
+		game.startRound(0);
+
+		const themes = messages.filter(text => text.startsWith('ROUND_THEMES2'));
+		expect(themes.some(text => text.includes('Тема'))).toBe(true);
+
+		const prices = game.session.themes[0].prices.length;
+		expect(prices).toBeGreaterThan(0);
+	});
+});

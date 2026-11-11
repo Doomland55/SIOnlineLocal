@@ -108,6 +108,14 @@ export class SIHostHub {
 				return JoinGameResult.NameIsOccupied;
 			}
 
+			// The seat could be reserved in the game settings (it has a name but nobody sits there yet):
+			// a live client takes it now, so the game could rely on this seat
+			if (existing.role !== PersonRole.Viewer) {
+				existing.isHuman = true;
+				existing.isBot = false;
+				existing.isMale = request.Sex !== 'Female';
+			}
+
 			return this.attach(connection, game, existing.name);
 		}
 

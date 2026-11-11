@@ -598,6 +598,44 @@ export class Game {
 		return this.buildMediaUrl(mediaPath);
 	}
 
+	/** Remembers the avatar of a person and broadcasts it to everybody. */
+	private handleAvatar(person: GamePerson, contentType: string, uri: string): void {
+		if (contentType !== 'image' && contentType !== 'video') {
+			return;
+		}
+
+		const value = uri.trim();
+
+		if (!value) {
+			return;
+		}
+
+		// Avatars are sent as hyperlinks; relative links are resolved by the clients against the game server
+		person.avatar = value;
+
+		const message = buildMessage(GameMessage.Avatar, person.name, contentType, value);
+		this.sendAll(message);
+
+		// Late joiners receive the current avatars with the rest of the state
+		this.avatars.set(person.name, { contentType, uri: value });
+	}
+
+	/** Avatars of the persons that are in the game (used for the full state sync). */
+	private readonly avatars = new Map<string, { contentType: string; uri: string }>();
+
+	/** Sends the avatars of all persons that are in the game. */
+	private sendAvatars(personName: string): void {
+		for (const [name, avatar] of this.avatars) {
+			const person = this.session.findPerson(name);
+
+			if (!person) {
+				continue;
+			}
+
+			this.sendTo(personName, buildMessage(GameMessage.Avatar, name, avatar.contentType, avatar.uri));
+		}
+	}
+
 	/** Sends the full game state to a person (used on join and on `INFO`). */
 	sendFullState(personName: string): void {
 		const { session } = this;
@@ -607,6 +645,7 @@ export class Game {
 		this.sendHostName(personName);
 		this.sendOptions(personName);
 		this.sendInfo(personName);
+		this.sendAvatars(personName);
 		this.sendSums(personName);
 		this.sendReady(personName);
 		this.sendAll(buildMessage(GameMessage.SetJoinMode, 'AnyRole', '-'));
@@ -834,6 +873,7 @@ export class Game {
 			case 'CHANGE':
 			case 'APELLATE':
 			case 'AVATAR':
+				this.handleAvatar(person, args[1] ?? '', args[2] ?? '');
 				break;
 
 			case 'SET_OPTIONS':
@@ -927,17 +967,17 @@ export class Game {
 		session.questionIndex = -1;
 		session.isQuestionPlaying = false;
 
-		const themes = round.themes
-			.map(theme => ({
-				name: theme.name,
-				comments: theme.info?.comments ?? '',
-				prices: theme.questions.map(question => question.price),
-			}))
-			.filter(theme => theme.prices.some(price => price >= 0));
+		// All themes of the round are kept, so the table keeps its original size.
+		// Played questions are marked with -1 (hidden) instead of being removed
+		const themes = round.themes.map(theme => ({
+			name: theme.name,
+			comments: theme.info?.comments ?? '',
+			prices: theme.questions.map(question => question.price),
+		}));
 
 		session.themes = themes;
 
-		if (themes.length === 0) {
+		if (themes.every(theme => !theme.prices.some(price => price >= 0))) {
 			this.endRound('empty');
 			return;
 		}
@@ -1276,14 +1316,17 @@ export class Game {
 	private beginPressPhase(): void {
 		const { session } = this;
 
+		// Oral game: players answer without pressing the button, the showman decides who is right
+		if (this.options.oral) {
+			this.beginOralPhase();
+			return;
+		}
+
 		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
 			return;
 		}
 
-		this.pendingPressers = session.players
-			.map((player, index) => ({ player, index }))
-			.filter(({ player, index }) => player.name.trim() && !this.answeredPlayers.has(index))
-			.map(({ index }) => index);
+		this.pendingPressers = this.collectPressers();
 
 		if (this.pendingPressers.length === 0) {
 			this.finishQuestionWithoutAnswer();
@@ -1301,10 +1344,65 @@ export class Game {
 			}
 
 			this.sendAll(buildMessage(GameMessage.EndTry, 'A'));
-			this.finishQuestionWithoutAnswer();
+
+			// Timer runs out: the players that have already passed do not get another chance,
+			// so when only the passed players are left the question ends right away
+			if (this.areOnlyPassedPlayersLeft()) {
+				this.finishQuestionWithoutAnswer();
+				return;
+			}
+
+			this.beginPressPhase();
 		});
 
 		this.scheduleBotPresses();
+	}
+
+	/**
+	 * Oral game phase: nobody presses the button, every player could answer out loud.
+	 * Every live player gets an answer input, so the answer is checked as soon as somebody gives it.
+	 */
+	private beginOralPhase(): void {
+		const { session } = this;
+
+		this.sendAll(buildMessage(GameMessage.OralAnswer));
+
+		// The press phase has not started yet, so everybody who has not answered is still able to answer
+		if (this.pendingPressers.length === 0) {
+			this.pendingPressers = this.collectPressers();
+		}
+
+		const answerers = this.pendingPressers.filter(index => this.isActiveSeat(session.players[index]));
+
+		if (answerers.length === 0) {
+			this.finishQuestionWithoutAnswer();
+			return;
+		}
+
+		// Any of the players could answer: the engine accepts an answer from every one of them
+		for (const index of answerers) {
+			const player = session.players[index];
+
+			if (player.isHuman && player.isConnected) {
+				this.sendTo(player.name, buildMessage(GameMessage.Answer, 'text'));
+			} else if (player.isBot) {
+				this.schedule(1 + Math.random() * 2, () => {
+					if (this.session.isQuestionPlaying && !this.session.isQuestionAnswerShown) {
+						this.validateAnswer(index, this.getBotAnswer(index), this.shouldBotAnswerRight());
+					}
+				});
+			}
+		}
+
+		const answerTime = this.getTimeSettings().timeForThinkingOnQuestion;
+
+		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, -1));
+
+		this.schedule(answerTime, () => {
+			if (this.session.isQuestionPlaying && !this.session.isQuestionAnswerShown) {
+				this.finishQuestionWithoutAnswer();
+			}
+		});
 	}
 
 	/** Makes bots press the button from time to time. */
@@ -1400,7 +1498,33 @@ export class Game {
 			return;
 		}
 
+		// In an oral game the showman decides whether the answer is right, so the answer goes to them
+		if (this.options.oral) {
+			this.askToValidate(index, answer);
+			return;
+		}
+
 		this.validateAnswer(index, answer, this.isAnswerRight(answer));
+	}
+
+	/**
+	 * Sends the answer of a player to the showman of an oral game.
+	 * The showman answers with `VALIDATE\n<playerIndex>\n<+|->\n<factor>`.
+	 */
+	private askToValidate(playerIndex: number, answer: string): void {
+		const { session } = this;
+		const managerName = this.getManagerName();
+		const manager = managerName ? this.session.findPerson(managerName) : null;
+
+		// Nobody could check the answer: the game accepts it on its own, so the question does not hang
+		if (!manager || !manager.isHuman || !manager.isConnected) {
+			this.validateAnswer(playerIndex, answer, this.isAnswerRight(answer));
+			return;
+		}
+
+		session.players[playerIndex].answer = answer;
+		this.sendAll(buildMessage(GameMessage.PlayerAnswer, playerIndex, answer));
+		this.sendTo(managerName, buildMessage(GameMessage.AskValidate, playerIndex, answer, '+'));
 	}
 
 	private handleAnswerVersion(sender: string, answer: string): void {
@@ -1707,14 +1831,61 @@ export class Game {
 	}
 
 	private handlePass(sender: string): void {
-		const index = this.session.getPlayerIndex(sender);
+		const { session } = this;
+		const index = session.getPlayerIndex(sender);
 
 		if (index < 0) {
 			return;
 		}
 
 		this.sendAll(buildMessage(GameMessage.Pass, index));
-		this.session.players[index].stake = 0;
+		session.players[index].stake = 0;
+
+		// A pass during a question means that the player refuses to answer it: once everybody
+		// has passed, the question is over and the right answer is shown
+		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
+			return;
+		}
+
+		session.players[index].state = 'Pass';
+		this.pendingPressers = this.pendingPressers.filter(value => value !== index);
+
+		if (!this.areOnlyPassedPlayersLeft()) {
+			return;
+		}
+
+		this.sendAll(buildMessage(GameMessage.Timer, 1, 'STOP'));
+		this.sendAll(buildMessage(GameMessage.EndTry, 'A'));
+		this.finishQuestionWithoutAnswer();
+	}
+
+	/** Indexes of the players that still could press the button and have not answered yet. */
+	private collectPressers(): number[] {
+		return this.session.players
+			.map((player, index) => ({ player, index }))
+			.filter(({ player, index }) => this.isActiveSeat(player) && !this.answeredPlayers.has(index))
+			.map(({ index }) => index);
+	}
+
+	/**
+	 * True when the seat could act right now: it is taken either by a bot or by a live connected player.
+	 * The seats reserved in the game settings and the seats of the players that have left are ignored.
+	 */
+	private isActiveSeat(player: GamePerson | undefined): boolean {
+		if (!player || player.name.trim().length === 0) {
+			return false;
+		}
+
+		return player.isBot || (player.isHuman && player.isConnected);
+	}
+
+	/** True when every player that still could answer has passed this question. */
+	private areOnlyPassedPlayersLeft(): boolean {
+		const active = this.session.players
+			.map((player, index) => ({ player, index }))
+			.filter(({ player, index }) => this.isActiveSeat(player) && !this.answeredPlayers.has(index));
+
+		return active.length === 0 || active.every(({ player }) => player.state === 'Pass');
 	}
 
 	private handleStake(sender: string, mode: string, value: number): void {
@@ -2176,8 +2347,9 @@ export class Game {
 			return;
 		}
 
-		// The same message the real server sends: clients update their settings from it
-		this.sendAll(buildMessage(GameMessage.Options2, person.name, name, value));
+		// The same message the real server sends: clients update their settings from it.
+		// The client knows the blocking button time under the `ButtonBlocking` name, so it is sent the way it expects
+		this.sendAll(buildMessage(GameMessage.Options2, person.name, this.clientOptionName(name), value));
 		this.notifyChanged();
 	}
 
@@ -2209,6 +2381,7 @@ export class Game {
 				return true;
 
 			case 'UseApellations':
+			case 'UseAppellations':
 				options.useApellations = isEnabled;
 				return true;
 
@@ -2242,6 +2415,24 @@ export class Game {
 		}
 	}
 
+	/** Name of the option used by the clients (the client name differs for some options). */
+	private clientOptionName(name: string): string {
+		switch (name) {
+			case 'TimeForBlockingButton':
+				return 'ButtonBlocking';
+
+			case 'PartialImageTime':
+				return 'PartialImage';
+
+			case 'UseApellations':
+			case 'UseAppellations':
+				return 'UseAppellations';
+
+			default:
+				return name;
+		}
+	}
+
 	/** Sends the current game options to a client (or to everyone). */
 	sendOptions(personName?: string): void {
 		const { options } = this;
@@ -2251,11 +2442,11 @@ export class Game {
 			['FalseStart', String(options.falseStart)],
 			['PartialText', String(options.partialText)],
 			['PartialImages', String(options.partialImages)],
-			['UseApellations', String(options.useApellations)],
+			['UseAppellations', String(options.useApellations)],
 			['DisplayAnswerOptionsLabels', String(options.displayAnswerOptionsLabels)],
 			['ReadingSpeed', String(options.readingSpeed)],
-			['PartialImageTime', String(options.partialImageTime)],
-			['TimeForBlockingButton', String(this.getTimeSettings().timeForBlockingButton)],
+			['PartialImage', String(options.partialImageTime)],
+			['ButtonBlocking', String(this.getTimeSettings().timeForBlockingButton)],
 		];
 
 		const text = buildMessage(GameMessage.Options2, '', ...pairs.flat());
@@ -2268,9 +2459,51 @@ export class Game {
 	}
 
 	private handleValidation(person: GamePerson, args: string[]): void {
-		// Showman validation is not supported by the local server: answers are validated by the engine
-		void person;
-		void args;
+		// The showman of an oral game marks the answer of a player as right or wrong.
+		// The client sends the answer text (`VALIDATE\n<answer>\n<+|->\n<factor>`),
+		// the answerer could be sent by its index too (that is what `ASK_VALIDATE` gives)
+		if (!this.canManage(person) || !this.options.oral) {
+			return;
+		}
+
+		if (!this.session.isQuestionPlaying || this.session.isQuestionAnswerShown) {
+			return;
+		}
+
+		const subject = args[1] ?? '';
+		const sign = args[2] === '+' || args[2] === '-' ? args[2] : '+';
+
+		// The answer text is matched first: an answer could be a number too, so an index is used only as a fallback
+		const answeredIndex = this.findAnswererByAnswer(subject);
+		const index = answeredIndex >= 0 ? answeredIndex : this.findAnswererByIndex(subject);
+
+		if (index < 0) {
+			return;
+		}
+
+		const answer = answeredIndex >= 0 ? subject : this.session.players[index].answer;
+
+		this.validateAnswer(index, answer, sign === '+');
+	}
+
+	/** Finds the player by its index in the request of the showman. */
+	private findAnswererByIndex(value: string): number {
+		const index = parseInt(value, 10);
+
+		if (!/^\d+$/.test(value.trim()) || !this.session.players[index]) {
+			return -1;
+		}
+
+		return index;
+	}
+
+	/** Finds the player that has given the answer (used by the showman validation). */
+	private findAnswererByAnswer(answer: string): number {
+		const normalized = this.normalizeAnswer(answer);
+
+		return this.session.players.findIndex(player => this.normalizeAnswer(player.answer) === normalized
+			&& (player.isHuman || player.isBot)
+			&& player.name.trim().length > 0);
 	}
 
 	private handlePreloadProgress(sender: string, progress: number): void {

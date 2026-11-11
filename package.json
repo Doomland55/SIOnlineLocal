@@ -13,7 +13,7 @@
     "build-lib-quest": "webpack --mode production --env type=library-quest",
     "start": "webpack serve --mode development",
     "server": "ts-node --transpile-only --project server/tsconfig.json server/src/index.ts",
-    "test:server": "node server/scripts/seats-test.js && node server/scripts/smoke-test.js && node server/scripts/signalr-client-test.js && node server/scripts/answer-options-test.js && node server/scripts/host-rights-test.js",
+    "test:server": "node server/scripts/seats-test.js && node server/scripts/smoke-test.js && node server/scripts/signalr-client-test.js && node server/scripts/answer-options-test.js && node server/scripts/host-rights-test.js && node server/scripts/midgame-rules-test.js",
     "test:local-server": "jest test/localServer.test.ts",
     "make-test-package": "node server/scripts/make-test-package.js",
     "serve-local": "npm run build-local && npm run server",

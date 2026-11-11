@@ -102,7 +102,8 @@ export function RoundTable(props: RoundTableProps) {
 						className={themeClassName}
 						onClick={() => onThemeHeaderClick(themeIndex)}>
 						<AutoSizedText minFontSize={8} maxFontSize={60}>
-							{hasQuestions ? themeInfo.name : ''}
+							{/* The theme keeps its place and its name even when all its questions are played */}
+							{themeInfo.name}
 						</AutoSizedText>
 					</div>
 

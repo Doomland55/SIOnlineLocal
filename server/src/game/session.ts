@@ -39,6 +39,9 @@ export interface GamePerson {
 
 	/** Player answer to the current question. */
 	answer: string;
+
+	/** Avatar image url of a live person (sent by the client with the `AVATAR` command). */
+	avatar?: string;
 }
 
 /** A theme of the round table. */
