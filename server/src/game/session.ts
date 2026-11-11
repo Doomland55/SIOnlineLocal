@@ -68,6 +68,9 @@ export enum GamePhase {
 
 const ANY_NAME = ' ';
 
+/** Maximum number of player seats in a game (the same limit as in the web client). */
+export const MAX_PLAYER_COUNT = 12;
+
 /** Default bot names. */
 export const DEFAULT_BOT_NAMES = ['Иннокентий', 'Александра', 'Борис', 'Василиса', 'Григорий', 'Дарья'];
 

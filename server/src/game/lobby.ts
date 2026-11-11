@@ -5,7 +5,7 @@ import { requestBaseUrl } from '../api/requestContext';
 import { Game, GameObserver } from './game';
 import { PackageLibrary } from './library';
 import { loadPackage, LoadedPackage } from './package';
-import { GamePerson, GamePhase, GameSession, PersonRole } from './session';
+import { GamePerson, GamePhase, GameSession, isEmptySlotName, MAX_PLAYER_COUNT, PersonRole } from './session';
 
 export interface LobbyOptions {
 	/**
@@ -36,6 +36,9 @@ export interface LobbyOptions {
 	/** Logger. */
 	log: (message: string) => void;
 }
+
+/** Number of bots that fill an automatic game. */
+const AUTOMATIC_GAME_BOT_COUNT = 5;
 
 /** Observes all games and provides lobby-level operations. */
 export class Lobby implements GameObserver {
@@ -106,13 +109,20 @@ export class Lobby implements GameObserver {
 		return this.createGame(loaded, gameName, showmanName, playerNames);
 	}
 
-	/** Creates a game from an already loaded package. */
+	/**
+	 * Creates a game from an already loaded package.
+	 *
+	 * `playerNames` are the seats that the game starts with: the showman seat is always present,
+	 * every name takes a player seat and `emptySlots` free seats are added for other players.
+	 * Free seats are visible in the lobby, so live players could see where they can join.
+	 */
 	createGame(
 		loaded: LoadedPackage,
 		gameName: string,
 		showmanName: string,
 		playerNames: string[],
 		isAutomatic = false,
+		emptySlots = 0,
 	): Game {
 		const id = this.nextGameId;
 		this.nextGameId += 1;
@@ -127,16 +137,34 @@ export class Lobby implements GameObserver {
 			this.getBaseUrl(),
 		);
 
+		// The showman seat is a placeholder until a live client takes it: the server acts as the showman,
+		// so another player could join the game as the showman (or take any free seat)
 		game.session.showman.name = showmanName;
-		game.session.showman.isHuman = true;
-		game.session.showman.isBot = false;
+		game.session.showman.isHuman = false;
+		game.session.showman.isBot = true;
 		game.session.showman.isConnected = false;
 
-		playerNames.forEach(name => {
-			game.session.players.push(this.createPerson(name));
-		});
+		playerNames
+			.filter(name => !isEmptySlotName(name))
+			.forEach(name => {
+				game.session.players.push(this.createPerson(name));
+			});
 
-		while (game.session.players.length < 6) {
+		// Free seats that other players could take; the table size must stay within the game limits
+		const freeSlots = Math.max(0, Math.min(
+			Math.max(0, emptySlots),
+			MAX_PLAYER_COUNT - game.session.players.length,
+		));
+
+		for (let index = 0; index < freeSlots; index += 1) {
+			game.session.players.push(this.createPerson(GameSession.EMPTY_NAME));
+		}
+
+		// At least one seat must stay free before the game starts: players join an existing game,
+		// and the lobby only shows the "join as player" option when a free seat is visible
+		if (game.session.phase === GamePhase.Before
+			&& game.session.players.length < MAX_PLAYER_COUNT
+			&& !game.session.players.some(player => isEmptySlotName(player.name))) {
 			game.session.players.push(this.createPerson(GameSession.EMPTY_NAME));
 		}
 
@@ -202,9 +230,9 @@ export class Lobby implements GameObserver {
 		const game = this.createGame(loaded, loaded.package.name, this.options.defaultShowmanName, [], true);
 
 		// Automatic games are filled with bots so that the game can be played alone,
-		// but one free slot is always kept for a live player
+		// but a free seat is always kept for a live player
 		for (const botName of this.options.botNames) {
-			if (game.session.players.length >= 5) {
+			if (game.session.players.length >= AUTOMATIC_GAME_BOT_COUNT) {
 				break;
 			}
 
@@ -213,6 +241,11 @@ export class Lobby implements GameObserver {
 			bot.isReady = true;
 			bot.isMale = Math.random() > 0.5;
 			game.session.players.push(bot);
+		}
+
+		// A live player that has created the automatic game must have a seat to take
+		if (!game.session.players.some(player => isEmptySlotName(player.name))) {
+			game.session.players.push(this.createPerson(GameSession.EMPTY_NAME));
 		}
 
 		return this.successResponse(game);
@@ -259,19 +292,27 @@ export class Lobby implements GameObserver {
 		const { session } = game;
 		const persons: PersonInfoModel[] = [];
 
+		// Empty seats are reported too: the web client shows a role as available when it has an offline person,
+		// so without them the "join as player" button is disabled even if there are free seats
 		const appendPerson = (person: GamePerson) => {
-			if (!person.name.trim()) {
-				return;
-			}
-
 			persons.push({
-				IsOnline: person.isConnected,
-				Name: person.name,
+				IsOnline: person.isConnected || (person.isBot && person.role !== PersonRole.Showman),
+				Name: person.name.trim() ? person.name : '',
 				Role: person.role,
 			});
 		};
 
-		appendPerson(session.showman);
+		// The server drives the showman seat: it stays available for a live player until someone takes it
+		if (!session.showman.name.trim() || session.showman.isHuman) {
+			appendPerson(session.showman);
+		} else {
+			persons.push({
+				IsOnline: false,
+				Name: session.showman.name,
+				Role: PersonRole.Showman,
+			});
+		}
+
 		session.players.forEach(appendPerson);
 		session.viewers.filter(viewer => viewer.isConnected).forEach(appendPerson);
 
@@ -287,7 +328,7 @@ export class Lobby implements GameObserver {
 			GameName: game.session.name,
 			Language: this.options.language,
 			Mode: 'Tv' as LobbyGameMode,
-			Owner: session.showman.name,
+			Owner: session.showman.name.trim() ? session.showman.name : session.name,
 			PackageName: session.packageInfo.package.name,
 			PasswordRequired: false,
 			Persons: persons,

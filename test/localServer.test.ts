@@ -7,7 +7,7 @@ import { getMediaUrl, getPackageMediaUris, loadPackage, LoadedPackage } from '..
 import { Lobby } from '../server/src/game/lobby';
 import { PackageLibrary } from '../server/src/game/library';
 import { Game } from '../server/src/game/game';
-import { GamePhase } from '../server/src/game/session';
+import { GamePhase, isEmptySlotName } from '../server/src/game/session';
 
 const QUESTION_XML = `<?xml version="1.0" encoding="utf-8"?>
 <package name="Тест" version="5">
@@ -119,6 +119,70 @@ describe('Package loading', () => {
 		const relativePath = uris[0].split('/').slice(3).join('/');
 
 		expect(fs.existsSync(path.join(loaded.rootDir, relativePath))).toBe(true);
+	});
+});
+
+describe('Game seats', () => {
+	it('creates only the requested seats instead of six fixed ones', async () => {
+		const dir = createTempDir();
+		const filePath = await createPackage(dir);
+		const loaded = await loadPackage(filePath, 'test.siq', path.join(dir, 'media'));
+
+		const lobby = new Lobby(
+			new PackageLibrary(path.dirname(filePath), path.join(dir, 'media'), () => { }),
+			{
+				publicBaseUrl: 'http://localhost:8080',
+				serverName: 'test',
+				defaultShowmanName: 'Ведущий',
+				language: 'ru-RU',
+				botNames: [],
+				log: () => { },
+			},
+			path.join(dir, 'uploads'),
+		);
+
+		// A game created with three live player names and no extra seats
+		const game = lobby.createGame(loaded, 'Игра', 'Ведущий', ['Игрок 1', 'Игрок 2', 'Игрок 3'], false, 0);
+
+		// Three players plus at least one free seat for other players, not six fixed seats
+		expect(game.session.players.filter(player => !isEmptySlotName(player.name))).toHaveLength(3);
+		expect(game.session.players.filter(player => isEmptySlotName(player.name)).length).toBeGreaterThanOrEqual(1);
+		expect(game.session.players.length).toBeLessThan(6);
+
+		game.dispose();
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	it('reports free seats and the free showman seat to the lobby', async () => {
+		const dir = createTempDir();
+		const filePath = await createPackage(dir);
+		const loaded = await loadPackage(filePath, 'test.siq', path.join(dir, 'media'));
+
+		const lobby = new Lobby(
+			new PackageLibrary(path.dirname(filePath), path.join(dir, 'media'), () => { }),
+			{
+				publicBaseUrl: 'http://localhost:8080',
+				serverName: 'test',
+				defaultShowmanName: 'Ведущий',
+				language: 'ru-RU',
+				botNames: [],
+				log: () => { },
+			},
+			path.join(dir, 'uploads'),
+		);
+
+		const game = lobby.createGame(loaded, 'Игра', 'Ведущий', ['Игрок 1'], false, 2);
+		const info = lobby.buildGameInfo(game);
+		const freeSeats = info.Persons.filter(person => !person.IsOnline);
+
+		// Free player seats are visible, so the web client enables the "join as player" button
+		expect(freeSeats.filter(person => person.Role === 'Player').length).toBeGreaterThanOrEqual(1);
+
+		// The server drives the showman seat, so a live player could take it
+		expect(freeSeats.some(person => person.Role === 'Showman')).toBe(true);
+
+		game.dispose();
+		fs.rmSync(dir, { recursive: true, force: true });
 	});
 });
 

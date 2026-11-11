@@ -2,11 +2,17 @@ import { HubConnection } from '../signalr/hubConnection';
 import { GameInfoModel, JoinGameRequestModel, JoinGameResult, JoinGameResultValue, MessageModel, PersonInfoModel } from '../api/models';
 import { Game } from '../game/game';
 import { Lobby } from '../game/lobby';
-import { GamePhase, GameSession, PersonRole } from '../game/session';
+import { GamePhase, GameSession, isEmptySlotName, MAX_PLAYER_COUNT, PersonRole } from '../game/session';
 import { requestBaseUrl } from '../api/requestContext';
 
 /** Marker of the game client receiver (all messages to the game go through it). */
 const GAME_CLIENT = '@';
+
+/** Returns true when nobody occupies the showman seat. */
+function isShowmanSlotFree(showman: { name: string; isHuman: boolean }): boolean {
+	// The server acts as the showman until a live client takes the seat
+	return !showman.isHuman || isEmptySlotName(showman.name);
+}
 
 interface JoinState {
 	gameId: number;
@@ -112,7 +118,8 @@ export class SIHostHub {
 			case 'Showman': {
 				const showman = game.session.showman;
 
-				if (showman.name.trim() && showman.name !== GameSession.EMPTY_NAME) {
+				// Free showman seat: either not taken yet or released by a previous showman / server default
+				if (!isShowmanSlotFree(showman) && showman.name !== userName) {
 					return JoinGameResult.ForbiddenRole;
 				}
 
@@ -128,7 +135,12 @@ export class SIHostHub {
 			}
 
 			case 'Player': {
-				const index = game.session.players.findIndex(player => !player.name.trim() || player.name === GameSession.EMPTY_NAME);
+				let index = game.session.players.findIndex(player => isEmptySlotName(player.name));
+
+				if (index < 0 && game.session.phase === GamePhase.Before) {
+					// The game is still in the lobby: a new table could be added for a live player
+					index = this.addTable(game);
+				}
 
 				if (index < 0) {
 					return JoinGameResult.NoFreePlace;
@@ -178,6 +190,29 @@ export class SIHostHub {
 	/** Runs an action with the server url that the given client has used. */
 	private withBaseUrl<T>(connection: HubConnection, action: () => T): T {
 		return connection.baseUrl ? requestBaseUrl.run(connection.baseUrl, action) : action();
+	}
+
+	/** Adds a player seat to a game that is still in the lobby. Returns its index or -1. */
+	private addTable(game: Game): number {
+		if (game.session.players.length >= MAX_PLAYER_COUNT) {
+			return -1;
+		}
+
+		game.session.players.push({
+			name: GameSession.EMPTY_NAME,
+			role: PersonRole.Player,
+			isMale: false,
+			isHuman: false,
+			isConnected: false,
+			isBot: false,
+			isReady: false,
+			sum: 0,
+			stake: 0,
+			state: 'None',
+			answer: '',
+		});
+
+		return game.session.players.length - 1;
 	}
 
 	/** Releases the seat that a person has occupied before joining another role. */

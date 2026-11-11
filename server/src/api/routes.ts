@@ -6,6 +6,7 @@ import { PackageLibrary } from '../game/library';
 import { Lobby } from '../game/lobby';
 import { LocalContentStorage, sendFile } from './storage';
 import { requestBaseUrl } from './requestContext';
+import { isEmptySlotName } from '../game/session';
 import {
 	GameByPinResponseModel,
 	GameCreationResultCode,
@@ -156,6 +157,9 @@ async function resolvePackage(
 
 	return { error: GameCreationResultCode.NoPackage };
 }
+
+/** Name of the server-driven showman seat in games created through the REST API. */
+const DEFAULT_SHOWMAN_NAME = 'Ведущий';
 
 /** Registers REST API routes of the local server. */
 export function registerRoutes(
@@ -317,16 +321,49 @@ export function registerRoutes(
 
 			const loaded = await library.load(resolved.filePath);
 			const settings = body.gameSettings;
-			const showmanName = settings.showman?.name?.trim() || 'Ведущий';
+			// An empty showman name means "the server acts as the showman": then any player could take the seat
+			const showmanIsHuman = settings.showman?.isHuman === true && Boolean(settings.showman?.name?.trim());
+			const showmanName = settings.showman?.name?.trim() || DEFAULT_SHOWMAN_NAME;
 			const playerNames = (settings.players ?? [])
-				.filter(player => player?.name?.trim())
+				.filter(player => player?.name?.trim() && player.isHuman !== false)
 				.map(player => player.name);
 
-			const game = lobby.createGame(loaded, settings.networkGameName, showmanName, playerNames);
+			// The client sends human player slots as `Constants.ANY_NAME` (a single space);
+			// every such placeholder becomes a free seat that other players could take
+			const freeSlots = (settings.players ?? [])
+				.filter(player => player?.isHuman !== false && !player?.name?.trim())
+				.length;
 
-			game.session.showman.isHuman = settings.showman?.isHuman !== false;
+			const game = lobby.createGame(
+				loaded,
+				settings.networkGameName,
+				showmanName,
+				playerNames,
+				false,
+				freeSlots,
+			);
+
+			game.session.showman.isHuman = showmanIsHuman;
+			game.session.showman.isBot = !showmanIsHuman;
 			game.session.showman.isMale = settings.showman?.isMale !== false;
 			game.setTimeSettings(settings.appSettings?.timeSettings as Record<string, number> | undefined);
+
+			// Computer accounts from the game settings fill the remaining seats as bots
+			(settings.players ?? [])
+				.filter(player => player?.name?.trim() && player.isHuman === false)
+				.forEach(player => {
+					const bot = game.session.players.find(slot => isEmptySlotName(slot.name));
+
+					if (!bot) {
+						return;
+					}
+
+					bot.name = player.name;
+					bot.isHuman = false;
+					bot.isBot = true;
+					bot.isMale = player.isMale !== false;
+					bot.isReady = true;
+				});
 
 			log(`[api] игра ${game.id} создана через REST API: «${game.session.name}»`);
 
