@@ -111,6 +111,10 @@ export function GameInfoView(props: GameInfoViewProps): JSX.Element {
 		);
 	}
 
+	return <GameInfoContent {...props} game={props.game} />;
+}
+
+function GameInfoContent(props: GameInfoViewProps & { game: GameInfo }): JSX.Element {
 	const appDispatch = useAppDispatch();
 	const login = useAppSelector(state => state.user.login);
 	const authName = useAppSelector(state => state.user.authName);

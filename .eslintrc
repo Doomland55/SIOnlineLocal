@@ -5,7 +5,8 @@
 		"@typescript-eslint",
 		"import",
 		"jsx-a11y",
-		"react"
+		"react",
+		"react-hooks"
 	],
 	"extends": [
 		"eslint:recommended",
@@ -17,6 +18,7 @@
 		"project": "./tsconfig.json"
 	},
 	"rules": {
+		"react-hooks/rules-of-hooks": "error",
 		"linebreak-style": "off",
 		"no-tabs": "off",
 		"@typescript-eslint/indent": "off",

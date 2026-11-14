@@ -448,7 +448,13 @@ export function registerStatic(
 	log: (message: string) => void,
 ): void {
 	app.get(/^\/package\/([^/]+)\/(.+)$/, (request, response) => {
-		const requestPath = decodeURIComponent(request.path);
+		let requestPath: string;
+		try {
+			requestPath = decodeURIComponent(request.path);
+		} catch {
+			response.status(400).end();
+			return;
+		}
 		const match = /^\/package\/([^/]+)\/(.+)$/.exec(requestPath);
 
 		if (!match) {
@@ -489,7 +495,7 @@ export function registerStatic(
 
 		if (!fs.existsSync(indexFile)) {
 			response.status(404).type('text/plain').send(
-				'Web client is not built. Run `npm run build-dev` or `npm run serve-dev` to build it.',
+				'Web client is not built. Run `npm run build-local` or `npm run serve-local`.',
 			);
 			return;
 		}

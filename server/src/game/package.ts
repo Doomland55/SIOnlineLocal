@@ -105,26 +105,77 @@ export function resolveMediaPath(pack: LoadedPackage, item: ContentItem): string
 	}
 
 	const folder = getMediaFolder(item.type);
-	const normalized = item.value.replaceAll('\\', '/').replace(/^\.?\/+/, '');
-
-	if (normalized.length === 0 || normalized.includes('..')) {
-		return null;
+	const raw = item.value.replaceAll('\\', '/').replace(/^\.?\/+/, '');
+	const references = [raw];
+	if (raw.startsWith('@')) {
+		references.push(raw.slice(1));
 	}
-
-	const candidates = folder ? [normalized, `${folder}/${normalized}`] : [normalized];
-
-	for (const candidate of candidates) {
-		if (fs.existsSync(path.join(pack.rootDir, candidate))) {
-			return candidate;
+	for (const reference of [...references]) {
+		try {
+			const decoded = decodeURIComponent(reference);
+			if (!references.includes(decoded)) {
+				references.push(decoded);
+			}
+		} catch {
+			// A literal percent sign is a valid filename too.
 		}
 	}
 
+	const candidates = references.flatMap(reference => folder ? [reference, `${folder}/${reference}`] : [reference]);
+	const valid = candidates.filter(candidate => {
+		const segments = candidate.split('/');
+		return segments.length > 0 && segments.every(segment => segment !== '' && segment !== '.' && segment !== '..' && !segment.includes('\0'));
+	});
+
+	// Prefer exact spelling, then try an unambiguous case/URI/Unicode-normalized match.
+	for (const relaxed of [false, true]) {
+		for (const candidate of valid) {
+			const resolved = findMediaFile(pack.rootDir, candidate, relaxed);
+			if (resolved !== null) {
+				return resolved;
+			}
+		}
+	}
 	return null;
+}
+
+/** Match each path segment without escaping the extracted package or guessing between collisions. */
+function findMediaFile(root: string, candidate: string, relaxed: boolean): string | null {
+	const normalized = (value: string) => {
+		let decoded = value;
+		try { decoded = decodeURIComponent(value); } catch { /* literal percent */ }
+		return decoded.normalize('NFC').toLocaleLowerCase();
+	};
+	const parts = candidate.split('/');
+	const matches: string[] = [];
+	const visit = (directory: string, index: number, resolved: string[]) => {
+		try {
+			if (index === parts.length) {
+				if (fs.statSync(directory).isFile()) {
+					matches.push(resolved.join('/'));
+				}
+				return;
+			}
+			const names = relaxed
+				? fs.readdirSync(directory).filter(entry => normalized(entry) === normalized(parts[index]))
+				: [parts[index]];
+			for (const name of names) {
+				const fullPath = path.join(directory, name);
+				if (!fs.lstatSync(fullPath).isSymbolicLink()) {
+					visit(fullPath, index + 1, [...resolved, name]);
+				}
+			}
+		} catch {
+			// Missing entries are not errors; continue with the next candidate.
+		}
+	};
+	visit(root, 0, []);
+	return matches.length === 1 ? matches[0] : null;
 }
 
 /** Builds the public url of a package media file. */
 export function getMediaUrl(pack: LoadedPackage, relativePath: string): string {
-	return `${MEDIA_ROUTE_PREFIX}/${pack.id}/${relativePath}`;
+	return `${MEDIA_ROUTE_PREFIX}/${pack.id}/${relativePath.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 /** Lists all media urls referenced by the package (used for content preloading). */
@@ -150,7 +201,8 @@ function computePackageId(data: Buffer): string {
 function safeRelativePath(entryName: string): string | null {
 	const normalized = entryName.replaceAll('\\', '/');
 
-	if (normalized.startsWith('/') || normalized.includes('..')) {
+	if (normalized.startsWith('/') || path.win32.isAbsolute(normalized)
+		|| normalized.split('/').some(segment => segment === '..' || segment === '.') || normalized.includes('\0')) {
 		return null;
 	}
 
@@ -172,8 +224,10 @@ async function extractMedia(zip: JSZip, packageId: string, mediaDir: string): Pr
 		}
 
 		const relativeName = safeRelativePath(entry.name);
+		// JSZip sanitizes traversal names; do not accept the sanitized alias of an unsafe entry.
+		const originalName = safeRelativePath(entry.unsafeOriginalName ?? entry.name);
 
-		if (!relativeName) {
+		if (!relativeName || !originalName) {
 			continue;
 		}
 

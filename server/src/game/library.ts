@@ -4,7 +4,7 @@ import { loadPackage, LoadedPackage } from './package';
 
 /** Local packages library: everything in `packagesDir` plus uploaded packages. */
 export class PackageLibrary {
-	private cache = new Map<string, LoadedPackage>();
+	private cache = new Map<string, { loaded: LoadedPackage; size: number; mtimeMs: number; ctimeMs: number }>();
 
 	constructor(
 		public readonly packagesDir: string,
@@ -45,14 +45,16 @@ export class PackageLibrary {
 
 	/** Loads (and caches) a single package by absolute path. */
 	async load(filePath: string): Promise<LoadedPackage> {
+		const stat = fs.statSync(filePath);
 		const cached = this.cache.get(filePath);
 
-		if (cached && fs.existsSync(filePath)) {
-			return cached;
+		if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs && cached.ctimeMs === stat.ctimeMs
+			&& fs.existsSync(cached.loaded.rootDir)) {
+			return cached.loaded;
 		}
 
 		const loaded = await loadPackage(filePath, path.basename(filePath), this.mediaDir);
-		this.cache.set(filePath, loaded);
+		this.cache.set(filePath, { loaded, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs });
 		return loaded;
 	}
 
@@ -67,7 +69,7 @@ export class PackageLibrary {
 
 	/** Finds a cached package by identifier. */
 	findById(id: string): LoadedPackage | null {
-		for (const loaded of this.cache.values()) {
+		for (const { loaded } of this.cache.values()) {
 			if (loaded.id === id) {
 				return loaded;
 			}

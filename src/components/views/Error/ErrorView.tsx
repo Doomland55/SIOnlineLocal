@@ -1,9 +1,8 @@
 import * as React from 'react';
-import { connect } from 'react-redux';
-import { useAppDispatch } from '../../../state/hooks';
+import { connect, ReactReduxContext, ReactReduxContextValue } from 'react-redux';
+import { AppDispatch } from '../../../state/store';
 import localization from '../../../model/resources/localization';
 import { copyToClipboard } from '../../../state/globalActions';
-import { Dispatch } from '@reduxjs/toolkit';
 
 import './ErrorView.css';
 
@@ -14,13 +13,9 @@ interface ErrorViewProps {
 // TODO: provide a button to send error to the server
 
 export function ErrorView(props: ErrorViewProps): JSX.Element {
-	let appDispatch: Dispatch<any> | null = null;
-
-	try {
-		appDispatch = useAppDispatch();
-	} catch (e) {
-		console.log('useDispatch not initialized');
-	}
+	// This view is also rendered directly if initialization fails before a Provider exists.
+	const reduxContext = React.useContext(ReactReduxContext) as ReactReduxContextValue | null;
+	const appDispatch: AppDispatch | null = reduxContext ? reduxContext.store.dispatch as AppDispatch : null;
 
 	const copyTextToClipboard = () => {
 		if (props.error && appDispatch) {

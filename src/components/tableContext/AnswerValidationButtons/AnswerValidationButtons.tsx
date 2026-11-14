@@ -12,11 +12,6 @@ export default function AnswerValidationButtons(): JSX.Element | null {
 
 	const [firstValidationItem] = validation.queue;
 
-	// Nothing to decide: the buttons are shown only while there is an answer to check
-	if (!firstValidationItem) {
-		return null;
-	}
-
 	const [buttonsBlocked, setButtonsBlocked] = React.useState(false);
 	const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -25,6 +20,11 @@ export default function AnswerValidationButtons(): JSX.Element | null {
 			clearTimeout(timeoutRef.current);
 		}
 	}, []);
+
+	// Nothing to decide: the buttons are shown only while there is an answer to check
+	if (!firstValidationItem) {
+		return null;
+	}
 
 	const blockButtons = () => {
 		setButtonsBlocked(true);

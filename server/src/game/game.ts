@@ -1,5 +1,5 @@
 import { Question } from '../../../src/model/siquester/package';
-import { buildMessage, escapeNewLines, GameMessage, GameStage, MediaCategory } from '../protocol';
+import { buildMessage, escapeNewLines, GameMessage, GameStage, MediaCategory, SERVER_HOST_PLACEHOLDER } from '../protocol';
 import { AnswerOptionPlan, buildAnswerOptions, buildContentAtoms, ContentAtom, getAnswerContentAtoms } from './questionPlan';
 import { getMediaUrl, LoadedPackage, MEDIA_ROUTE_PREFIX, resolveMediaPath } from './package';
 import { GamePerson, GamePhase, GameSession, isEmptySlotName, PersonRole } from './session';
@@ -137,11 +137,6 @@ export class Game {
 		return this.session.persons.every(person => !person.isHuman || !person.isConnected);
 	}
 
-	/** Base url to use for media links of this game. */
-	private getMediaBaseUrl(): string {
-		return this.baseUrl ?? this.publicBaseUrl;
-	}
-
 	/**
 	 * Name of the person that manages the game (the client shows management buttons when its name matches `HOSTNAME`).
 	 * A live showman always manages the game, then the creator of the game, then the first connected live player:
@@ -186,15 +181,13 @@ export class Game {
 			person.isConnected = true;
 		}
 
-		if (baseUrl) {
-			this.baseUrl = baseUrl;
-		}
+		this.connectionBaseUrls.set(personName, (baseUrl ?? this.publicBaseUrl).replace(/\/+$/, ''));
 
 		this.notifyChanged();
 	}
 
-	/** Base url that clients of this game use (media links are built from it). */
-	private baseUrl: string | null = null;
+	/** Each client receives media URLs for the host it used to reach the server. */
+	private readonly connectionBaseUrls = new Map<string, string>();
 
 	/** Manager name that has been broadcast to the clients (see `sendHostName`). */
 	private announcedManagerName: string | null = null;
@@ -217,6 +210,7 @@ export class Game {
 		for (const [name, current] of this.connections.entries()) {
 			if (current === connection) {
 				this.connections.delete(name);
+				this.connectionBaseUrls.delete(name);
 
 				const person = this.session.findPerson(name);
 
@@ -425,13 +419,19 @@ export class Game {
 
 	/** Sends a message to all connected persons and remembers it for late joiners. */
 	sendAll(text: string): void {
-		for (const connection of this.connections.values()) {
+		for (const [name, connection] of this.connections) {
 			connection.send('Receive', {
 				IsSystem: true,
 				Sender: '@',
-				Text: text,
+				Text: this.resolveClientMediaUrls(name, text),
 			});
 		}
+	}
+
+	private resolveClientMediaUrls(name: string, text: string): string {
+		const marker = `${SERVER_HOST_PLACEHOLDER}${MEDIA_ROUTE_PREFIX}/${this.packageInfo.id}/`;
+		const base = this.connectionBaseUrls.get(name) ?? this.publicBaseUrl;
+		return text.replaceAll(marker, `${base}${MEDIA_ROUTE_PREFIX}/${this.packageInfo.id}/`);
 	}
 
 	/** Sends a message to a single person. */
@@ -445,7 +445,7 @@ export class Game {
 		connection.send('Receive', {
 			IsSystem: true,
 			Sender: '@',
-			Text: text,
+			Text: this.resolveClientMediaUrls(personName, text),
 		});
 
 		return true;
@@ -2828,7 +2828,7 @@ export class Game {
 	 * always load media from the very host they use to reach the server.
 	 */
 	private buildMediaUrl(mediaPath: string): string {
-		return `${this.getMediaBaseUrl()}${getMediaUrl(this.session.packageInfo, mediaPath)}`;
+		return `${SERVER_HOST_PLACEHOLDER}${getMediaUrl(this.session.packageInfo, mediaPath)}`;
 	}
 
 	/** Returns the current question (for diagnostics and tests). */

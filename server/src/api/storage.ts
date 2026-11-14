@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import mime from 'mime-types';
+import { Response } from 'express';
 
 /** Local content/storage service: packages, media and avatars stored on disk. */
 export class LocalContentStorage {
@@ -62,6 +62,9 @@ export class LocalContentStorage {
 
 	/** Resolves a package media file (`/package/<packageId>/<relativePath>`). */
 	getMediaPath(packageId: string, relativePath: string): string | null {
+		if (!/^[a-f0-9]{16}$/i.test(packageId)) {
+			return null;
+		}
 		const root = path.resolve(this.mediaDir, packageId);
 		const target = path.resolve(root, relativePath);
 
@@ -81,11 +84,10 @@ export class LocalContentStorage {
 }
 
 /** Sends a file with a proper content type. */
-export function sendFile(res: { setHeader: (name: string, value: string) => void; end: (data?: Buffer) => void }, filePath: string): void {
-	const contentType = mime.lookup(filePath) || 'application/octet-stream';
-	res.setHeader('Content-Type', contentType);
+export function sendFile(res: Response, filePath: string): void {
+	// Express streams the file and handles HEAD, byte ranges, and conditional requests.
 	res.setHeader('Cache-Control', 'public, max-age=3600');
-	res.end(fs.readFileSync(filePath));
+	res.sendFile(path.resolve(filePath));
 }
 
 export default LocalContentStorage;

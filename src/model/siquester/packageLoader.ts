@@ -383,7 +383,8 @@ function parseContentParam(paramElement: Element): ContentParam {
 			type: item.getAttribute('type') as ContentType ?? 'text',
 			value: item.textContent || '',
 			isRef: item.getAttribute('isRef')?.toLowerCase() === 'true', // Default to false
-			placement: item.getAttribute('placement') as 'replic' | 'background' | 'screen' ?? 'screen',
+			placement: (item.getAttribute('placement') as 'replic' | 'background' | 'screen' | null)
+				?? (item.getAttribute('type') === 'audio' ? 'background' : 'screen'),
 			duration: item.getAttribute('duration') || undefined,
 			waitForFinish: item.getAttribute('waitForFinish')?.toLowerCase() !== 'false', // Default to true
 		})),
