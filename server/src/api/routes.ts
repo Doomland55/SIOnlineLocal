@@ -341,6 +341,7 @@ export function registerRoutes(
 				playerNames,
 				false,
 				freeSlots,
+				{ password: settings.networkGamePassword, allowViewers: settings.allowViewers },
 			);
 
 			game.session.showman.isHuman = showmanIsHuman;

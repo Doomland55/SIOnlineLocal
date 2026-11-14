@@ -41,7 +41,14 @@ interface QuestionOutcome {
 	penaltyOrReward: number;
 }
 
-const MIN_STAKE_STEP = 100;
+/** A participant is bound to a name as seats may be released and reused during the final. */
+interface FinalParticipant {
+	name: string;
+	sum: number;
+	stake: number | null;
+	answer: string | null;
+	draft: string;
+}
 
 /** Seconds that the manager (a player in the showman seat of a server-driven game) has to check an answer. */
 const ORAL_VALIDATION_TIMEOUT = 15;
@@ -49,6 +56,11 @@ const ORAL_VALIDATION_TIMEOUT = 15;
 /** A single game hosted by the local server. */
 export class Game {
 	public readonly session: GameSession;
+
+	/** Join credentials and viewer policy set when the game is created. */
+	public joinPassword = '';
+
+	public allowViewers = true;
 
 	/** Connections of the persons by name. */
 	private readonly connections = new Map<string, GameClientConnection>();
@@ -77,8 +89,10 @@ export class Game {
 	/** True only while oral answers are being solicited. */
 	private oralAnswerPhase = false;
 
-	/** Number of answers received in the final round. */
-	private finalAnswers = new Map<number, string>();
+	/** Final decisions are kept private until the simultaneous reveal. */
+	private finalParticipants = new Map<number, FinalParticipant>();
+
+	private finalStage: 'none' | 'stake' | 'content' | 'answer' | 'reveal' = 'none';
 
 	/** Round timer value in tenths. */
 	private roundTimeLeft = 0;
@@ -89,8 +103,12 @@ export class Game {
 	/** Steps scheduled by the game logic. */
 	private pendingSteps: PendingStep[] = [];
 
-	/** Time when the round timer has been paused (milliseconds). */
-	private roundPausedAt: number | null = null;
+	/** The round deadline is independent of question-level steps. */
+	private roundStep: PendingStep | null = null;
+
+	private roundExpired = false;
+
+	private closingQuestion = false;
 
 	public readonly createdAt = new Date();
 
@@ -362,6 +380,18 @@ export class Game {
 
 		const index = session.getPlayerIndex(personName);
 
+		if (session.phase === GamePhase.Final) {
+			const participant = this.finalParticipants.get(index);
+			if (participant?.name === personName) {
+				if (this.finalStage === 'stake' && participant.stake === null) {
+					this.sendFinalStakePrompt(participant);
+				} else if (this.finalStage === 'answer' && participant.answer === null) {
+					this.sendTo(personName, buildMessage(GameMessage.Answer, 'text'));
+				}
+			}
+			return;
+		}
+
 		if (index === session.answererIndex) {
 			this.sendTo(personName, buildMessage(GameMessage.Answer, 'text'));
 		}
@@ -419,7 +449,7 @@ export class Game {
 	}
 
 	/** Schedules a server step. Steps are tracked so that a pause could freeze them. */
-	private schedule(seconds: number, action: () => void): NodeJS.Timeout {
+	private schedule(seconds: number, action: () => void): PendingStep {
 		const step: PendingStep = {
 			action,
 			dueAt: Date.now() + Math.max(0, seconds * 1000),
@@ -429,7 +459,7 @@ export class Game {
 
 		this.pendingSteps.push(step);
 		this.armStep(step);
-		return step.timeout as NodeJS.Timeout;
+		return step;
 	}
 
 	private armStep(step: PendingStep): void {
@@ -458,8 +488,6 @@ export class Game {
 
 			step.remaining = Math.max(0, step.dueAt - Date.now());
 		}
-
-		this.roundPausedAt = Date.now();
 	}
 
 	/** Resumes all pending steps (game resume). */
@@ -469,22 +497,22 @@ export class Game {
 		for (const step of this.pendingSteps) {
 			this.armStep(step);
 		}
-
-		if (this.roundPausedAt) {
-			this.roundTimeLeft = Math.max(0, this.roundTimeLeft - Math.floor((Date.now() - this.roundPausedAt) / 100));
-			this.roundPausedAt = null;
-		}
 	}
 
 	/** Cancels all pending steps. */
-	private cancelPending(): void {
+	private cancelPending(preserveRound = false): void {
 		for (const step of this.pendingSteps) {
-			if (step.timeout) {
+			if (step.timeout && (!preserveRound || step !== this.roundStep)) {
 				clearTimeout(step.timeout);
 			}
 		}
 
-		this.pendingSteps = [];
+		this.pendingSteps = preserveRound && this.roundStep && this.pendingSteps.includes(this.roundStep)
+			? [this.roundStep] : [];
+
+		if (!preserveRound) {
+			this.roundStep = null;
+		}
 	}
 
 	/** Sends the `INFO2` message with all game persons. */
@@ -839,7 +867,7 @@ export class Game {
 
 			case 'SET_STAKE':
 			case 'STAKE':
-				this.handleStake(sender, args[1] ?? '', parseInt(args[2], 10));
+				this.handleStake(sender, args[1] ?? '', Number(args[2] ?? ''));
 				break;
 
 			case 'CONFIG':
@@ -999,6 +1027,8 @@ export class Game {
 		}
 
 		this.roundTimeLeft = this.getRoundDuration(roundIndex);
+		this.roundExpired = false;
+		this.closingQuestion = false;
 
 		this.sendAll(buildMessage(GameMessage.Stage, GameStage.Round, round.name, roundIndex, 'SelectByPlayer'));
 		this.sendRoundInfo();
@@ -1007,7 +1037,14 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.Timer, 0, 'GO', this.roundTimeLeft));
 		this.notifyChanged();
 
-		this.schedule(this.roundTimeLeft / 10, () => this.endRound('timeout'));
+		this.roundStep = this.schedule(this.roundTimeLeft / 10, () => {
+			this.roundStep = null;
+			this.roundTimeLeft = 0;
+			this.roundExpired = true;
+			if (!session.isQuestionPlaying && !this.closingQuestion) {
+				this.endRound('timeout');
+			}
+		});
 
 		this.schedule(1, () => this.askToSelectQuestion());
 	}
@@ -1155,7 +1192,7 @@ export class Game {
 	private handleChoice(sender: string, themeIndex: number, questionIndex: number): void {
 		const { session } = this;
 
-		if (session.phase !== GamePhase.Round || session.isQuestionPlaying) {
+		if (session.phase !== GamePhase.Round || session.isQuestionPlaying || this.closingQuestion) {
 			return;
 		}
 
@@ -1179,6 +1216,7 @@ export class Game {
 		}
 
 		const price = prices[questionIndex];
+		this.closingQuestion = true; // A selected question must play even if the round time expires during the transition.
 		prices[questionIndex] = -1;
 
 		session.themeIndex = themeIndex;
@@ -1205,6 +1243,7 @@ export class Game {
 		const theme = session.themes[session.themeIndex];
 
 		session.isQuestionPlaying = true;
+		this.closingQuestion = false;
 		session.isQuestionAnswerShown = false;
 		session.answererIndex = -1;
 		session.answerers = [];
@@ -1213,7 +1252,7 @@ export class Game {
 		this.pendingPressers = [];
 		this.oralAnswerPhase = false;
 		this.atomIndex = 0;
-		this.finalAnswers.clear();
+
 
 		for (const player of session.players) {
 			player.state = 'None';
@@ -1518,6 +1557,14 @@ export class Game {
 	private handleAnswer(sender: string, answer: string): void {
 		const index = this.session.getPlayerIndex(sender);
 
+		if (this.session.phase === GamePhase.Final) {
+			const participant = this.finalParticipants.get(index);
+			if (!this.isPaused && this.finalStage === 'answer' && participant?.name === sender && participant.answer === null) {
+				participant.answer = answer;
+			}
+			return;
+		}
+
 		if (index < 0 || this.isPaused || this.session.phase !== GamePhase.Round
 			|| !this.session.isQuestionPlaying || this.session.isQuestionAnswerShown
 			|| this.answeredPlayers.has(index) || this.answersToValidate.has(index)) {
@@ -1587,6 +1634,14 @@ export class Game {
 	private handleAnswerVersion(sender: string, answer: string): void {
 		const index = this.session.getPlayerIndex(sender);
 
+		if (this.session.phase === GamePhase.Final) {
+			const participant = this.finalParticipants.get(index);
+			if (!this.isPaused && this.finalStage === 'answer' && participant?.name === sender && participant.answer === null) {
+				participant.draft = answer;
+			}
+			return;
+		}
+
 		if (index < 0) {
 			return;
 		}
@@ -1610,10 +1665,13 @@ export class Game {
 		const normalized = this.normalizeAnswer(answer);
 
 		if (this.answerOptions.length > 0) {
-			const option = this.answerOptions.find(item => item.label.toLocaleUpperCase() === answer.trim().toLocaleUpperCase());
+			const option = this.answerOptions.find(item => this.normalizeAnswer(item.label) === normalized);
 
 			if (option) {
-				return question.right.answer.some(right => this.normalizeAnswer(right) === this.normalizeAnswer(option.value));
+				const right = question.right.answer.map(value => this.normalizeAnswer(value));
+				const hasLabels = this.answerOptions.some(item => right.includes(this.normalizeAnswer(item.label)));
+				// Labels take precedence; older local packages may store option content instead.
+				return right.includes(this.normalizeAnswer(hasLabels ? option.label : option.value));
 			}
 		}
 
@@ -1730,7 +1788,9 @@ export class Game {
 
 		const right = question.right.answer.map(answer => this.normalizeAnswer(answer));
 
-		return this.answerOptions.findIndex(option => right.includes(this.normalizeAnswer(option.value)));
+		// SIQ select answers name an option; content matching supports older local packages.
+		const labelIndex = this.answerOptions.findIndex(option => right.includes(this.normalizeAnswer(option.label)));
+		return labelIndex >= 0 ? labelIndex : this.answerOptions.findIndex(option => right.includes(this.normalizeAnswer(option.value)));
 	}
 
 	/** Returns the label of the right answer option (used to mark it in the answer options layout). */
@@ -1753,9 +1813,10 @@ export class Game {
 		}
 
 		session.isQuestionPlaying = false;
+		this.closingQuestion = true;
 		this.oralAnswerPhase = false;
 		this.pendingPressers = [];
-		this.cancelPending();
+		this.cancelPending(true);
 		this.restoreRoundTimer();
 
 		if (outcome?.right) {
@@ -1768,6 +1829,12 @@ export class Game {
 			this.sendSums();
 			this.notifyChanged();
 
+			this.closingQuestion = false;
+			if (this.roundExpired) {
+				this.endRound('timeout');
+				return;
+			}
+
 			if (this.getActiveQuestionsCount() === 0) {
 				this.schedule(1, () => this.endRound('empty'));
 				return;
@@ -1779,7 +1846,16 @@ export class Game {
 
 	/** Restarts the round timer after a question has finished. */
 	private restoreRoundTimer(): void {
+		this.roundTimeLeft = this.getRoundTimeLeft();
 		this.sendAll(buildMessage(GameMessage.Timer, 0, 'GO', this.roundTimeLeft));
+	}
+
+	private getRoundTimeLeft(): number {
+		if (!this.roundStep) {
+			return this.roundTimeLeft;
+		}
+		const remaining = this.isPaused ? this.roundStep.remaining : this.roundStep.dueAt - Date.now();
+		return Math.max(0, Math.ceil(remaining / 100));
 	}
 
 	/** Ends the current round. */
@@ -1830,6 +1906,10 @@ export class Game {
 		session.chooserIndex = -1;
 		session.themeIndex = -1;
 		session.questionIndex = -1;
+		session.isQuestionPlaying = false;
+		session.isQuestionAnswerShown = false;
+		this.finalStage = 'none';
+		this.finalParticipants.clear();
 
 		session.themes = round.themes.map(theme => ({
 			name: theme.name,
@@ -1862,8 +1942,22 @@ export class Game {
 		session.questionIndex = questionIndex;
 		session.currentPrice = session.themes[themeIndex].prices[questionIndex];
 		session.isQuestionPlaying = true;
+		session.isQuestionAnswerShown = false;
 		this.answeredPlayers.clear();
-		this.finalAnswers.clear();
+		this.finalParticipants.clear();
+		for (const [index, player] of session.players.entries()) {
+			player.answer = '';
+			player.stake = 0;
+			player.state = 'None';
+			if (this.isActiveSeat(player) && Number.isSafeInteger(player.sum) && player.sum > 0) {
+				this.finalParticipants.set(index, { name: player.name, sum: player.sum, stake: null, answer: null, draft: '' });
+			}
+		}
+		if (this.finalParticipants.size === 0) {
+			this.endGame();
+			return;
+		}
+		this.finalStage = 'stake';
 
 		const question = session.currentQuestion;
 
@@ -1879,28 +1973,30 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.QuestionCaption, session.themes[themeIndex].name));
 		this.sendAll(buildMessage(GameMessage.QType, question.type || 'simple', 'True', 'False'));
 
-		// Ask stakes
-		const stakeModes = 'Stake,Pass,AllIn';
-		const maximum = Math.max(MIN_STAKE_STEP, session.currentPrice);
-
-		session.players.forEach(player => {
+		// All stakes remain secret until the final answer is revealed.
+		this.finalParticipants.forEach((participant, index) => {
+			const player = session.players[index];
 			if (player.isHuman && player.isConnected) {
-				this.sendTo(player.name, buildMessage(GameMessage.AskStake, stakeModes, MIN_STAKE_STEP, maximum, MIN_STAKE_STEP, 'FinalStake'));
-			} else if (player.name.trim()) {
-				player.stake = maximum;
+				this.sendFinalStakePrompt(participant);
+			} else if (player.isBot) {
+				participant.stake = participant.sum;
+				this.sendAll(buildMessage(GameMessage.PersonFinalStake, index));
 			}
 		});
 
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', this.getTimeSettings().timeForMakingStake * 10, -2));
-
 		this.schedule(this.getTimeSettings().timeForMakingStake, () => this.askFinalAnswers());
+	}
+
+	private sendFinalStakePrompt(participant: FinalParticipant): void {
+		this.sendTo(participant.name, buildMessage(GameMessage.AskStake, 'Stake,AllIn', 1, participant.sum, 1, 'FinalStake'));
 	}
 
 	private handlePass(sender: string): void {
 		const { session } = this;
 		const index = session.getPlayerIndex(sender);
 
-		if (index < 0) {
+		if (index < 0 || session.phase !== GamePhase.Round) {
 			return;
 		}
 
@@ -1955,46 +2051,44 @@ export class Game {
 	}
 
 	private handleStake(sender: string, mode: string, value: number): void {
+		if (this.isPaused || this.session.phase !== GamePhase.Final || this.finalStage !== 'stake') {
+			return;
+		}
+
 		const index = this.session.getPlayerIndex(sender);
-
-		if (index < 0) {
+		const participant = this.finalParticipants.get(index);
+		if (!participant || participant.name !== sender || participant.stake !== null) {
 			return;
 		}
 
-		const player = this.session.players[index];
-
-		if (!player) {
+		const stake = mode === 'AllIn' ? participant.sum : value;
+		if ((mode !== 'Stake' && mode !== 'AllIn') || !Number.isSafeInteger(stake) || stake < 1 || stake > participant.sum) {
 			return;
 		}
 
-		switch (mode) {
-			case 'Pass':
-				player.stake = 0;
-				this.sendAll(buildMessage(GameMessage.PersonStake, index, 2));
-				break;
-
-			case 'AllIn':
-				player.stake = Math.max(player.sum, this.session.currentPrice);
-				this.sendAll(buildMessage(GameMessage.PersonStake, index, 3));
-				break;
-
-			default:
-				player.stake = Number.isFinite(value) ? Math.max(MIN_STAKE_STEP, value) : this.session.currentPrice;
-				this.sendAll(buildMessage(GameMessage.PersonStake, index, 1, player.stake));
-				break;
-		}
-
-		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
+		participant.stake = stake;
+		this.session.players[index].stake = stake;
+		this.sendAll(buildMessage(GameMessage.PersonFinalStake, index));
 	}
 
 	/** Asks all players to give their final answers. */
 	private askFinalAnswers(): void {
 		const { session } = this;
 
-		if (!session.isQuestionPlaying) {
+		if (session.phase !== GamePhase.Final || !session.isQuestionPlaying || this.finalStage !== 'stake') {
 			return;
 		}
 
+		this.finalParticipants.forEach((participant, index) => {
+			if (participant.stake === null) {
+				participant.stake = 1;
+				if (session.players[index]?.name === participant.name) {
+					session.players[index].stake = 1;
+				}
+				this.sendAll(buildMessage(GameMessage.PersonFinalStake, index));
+			}
+		});
+		this.finalStage = 'content';
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 
 		// Show question content
@@ -2017,94 +2111,82 @@ export class Game {
 			return;
 		}
 
-		this.sendAll([GameMessage.Content2, 'screen', 0, '', atom.type, '', atom.value].join('\n'));
+		this.sendAll([GameMessage.Content2, 'screen', 0, '', atom.type, '',
+			atom.type === 'text' ? escapeNewLines(atom.value) : atom.value].join('\n'));
 		this.schedule(Math.max(atom.duration / 10, 0.2), () => this.showFinalContent());
 	}
 
 	private askAllAnswers(): void {
 		const { session } = this;
+		if (session.phase !== GamePhase.Final || this.finalStage !== 'content') {
+			return;
+		}
+		this.finalStage = 'answer';
 		const answerTime = this.getTimeSettings().timeForFinalThinking;
-
 		this.sendAll(buildMessage(GameMessage.FinalThink, answerTime));
 
-		session.players.forEach((player, index) => {
+		this.finalParticipants.forEach((participant, index) => {
+			const player = session.players[index];
+			if (player?.name !== participant.name) {
+				return;
+			}
 			if (player.isHuman && player.isConnected) {
-				this.sendTo(player.name, buildMessage(GameMessage.Answer, 'text'));
-			} else if (player.name.trim()) {
+				this.sendTo(participant.name, buildMessage(GameMessage.Answer, 'text'));
+			} else if (player.isBot) {
 				this.schedule(1 + Math.random() * 2, () => {
-					const isRight = this.shouldBotAnswerRight();
-					this.setFinalAnswer(index, isRight ? this.getBotAnswer(index) : '', isRight);
+					if (this.finalStage === 'answer' && participant.answer === null) {
+						participant.answer = this.shouldBotAnswerRight() ? this.getBotAnswer(index) : '';
+					}
 				});
 			}
 		});
 
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, -2));
-
 		this.schedule(answerTime, () => this.finishFinalQuestion());
-	}
-
-	private setFinalAnswer(index: number, answer: string, isRight: boolean): void {
-		this.finalAnswers.set(index, answer);
-		this.session.players[index].answer = answer;
-		this.sendAll(buildMessage(GameMessage.PlayerAnswer, index, answer));
-
-		if (this.finalAnswers.size >= this.session.players.filter(player => player.name.trim()).length) {
-			this.finishFinalQuestion();
-		}
-
-		void isRight;
 	}
 
 	private finishFinalQuestion(): void {
 		const { session } = this;
-
-		if (session.phase !== GamePhase.Final || !session.isQuestionPlaying) {
+		if (session.phase !== GamePhase.Final || !session.isQuestionPlaying || this.finalStage !== 'answer') {
 			return;
 		}
 
+		this.finalStage = 'reveal';
 		session.isQuestionPlaying = false;
 		this.cancelPending();
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
+		const answers = session.players.map((_player, index) => {
+			const participant = this.finalParticipants.get(index);
+			return escapeNewLines(participant ? participant.answer ?? participant.draft : '');
+		});
+		this.sendAll(buildMessage(GameMessage.Answers, ...answers));
+		this.showRightAnswer();
 
-		const question = session.currentQuestion;
-
-		if (question) {
-			this.sendAll([GameMessage.Answers, ...session.players.map(player => player.answer ?? '')].join('\n'));
-			this.sendAll(buildMessage(GameMessage.RightAnswer, 'text', question.right.answer[0] ?? ''));
-		}
-
-		session.players.forEach((player, index) => {
-			if (!player.name.trim()) {
-				return;
+		this.finalParticipants.forEach((participant, index) => {
+			const answer = participant.answer ?? participant.draft;
+			const stake = participant.stake ?? 1;
+			const isRight = answer.trim().length > 0 && this.isAnswerRight(answer);
+			const newSum = participant.sum + (isRight ? stake : -stake);
+			const player = session.players[index];
+			if (player?.name === participant.name) {
+				player.sum = newSum;
+				player.answer = answer;
+				player.stake = stake;
+				player.state = isRight ? 'Right' : 'Wrong';
+			} else {
+				// A disconnected participant can recover their updated score, never the new occupant's.
+				const saved = this.leftSeats.get(participant.name);
+				if (saved?.role === PersonRole.Player && saved.index === index) {
+					saved.sum = newSum;
+				}
 			}
-
-			const answer = this.finalAnswers.get(index) ?? player.answer ?? '';
-			const isRight = this.isFinalAnswerRight(answer);
-
-			if (isRight) {
-				player.sum += player.stake || 0;
-				player.state = 'Right';
-			} else if (player.stake > 0) {
-				player.sum -= player.stake;
-				player.state = 'Wrong';
-			}
-
+			this.sendAll(buildMessage(GameMessage.PersonStake, index, 1, stake));
 			this.sendAll(buildMessage(GameMessage.PersonFinalAnswer, index));
-			this.sendAll(buildMessage(GameMessage.Person, isRight ? '+' : '-', index, Math.abs(player.stake || 0)));
+			this.sendAll(buildMessage(GameMessage.Person, isRight ? '+' : '-', index, stake));
 		});
 
 		this.sendSums();
 		this.schedule(3, () => this.endGame());
-	}
-
-	private isFinalAnswerRight(answer: string): boolean {
-		const question = this.session.currentQuestion;
-
-		if (!question) {
-			return false;
-		}
-
-		return question.right.answer.some(right => this.normalizeAnswer(right) === this.normalizeAnswer(answer));
 	}
 
 	/** Finishes the game. */
@@ -2389,6 +2471,7 @@ export class Game {
 		// The server drives all timings, so a pause freezes pending steps and the round timer
 		if (isPaused) {
 			this.pauseSteps();
+			this.roundTimeLeft = this.getRoundTimeLeft();
 			this.sendAll(buildMessage(GameMessage.Pause, '+', this.roundTimeLeft));
 			return;
 		}

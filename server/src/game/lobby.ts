@@ -123,6 +123,7 @@ export class Lobby implements GameObserver {
 		playerNames: string[],
 		isAutomatic = false,
 		emptySlots = 0,
+		access: { password?: string; allowViewers?: boolean } = {},
 	): Game {
 		const id = this.nextGameId;
 		this.nextGameId += 1;
@@ -136,6 +137,9 @@ export class Lobby implements GameObserver {
 			this,
 			this.getBaseUrl(),
 		);
+
+		game.joinPassword = access.password ?? '';
+		game.allowViewers = access.allowViewers !== false;
 
 		// The showman seat is a placeholder until a live client takes it: the server acts as the showman,
 		// so another player could join the game as the showman (or take any free seat)
@@ -330,7 +334,7 @@ export class Lobby implements GameObserver {
 			Mode: 'Tv' as LobbyGameMode,
 			Owner: session.showman.name.trim() ? session.showman.name : session.name,
 			PackageName: session.packageInfo.package.name,
-			PasswordRequired: false,
+			PasswordRequired: game.joinPassword.length > 0,
 			Persons: persons,
 			ProgressCurrent: playedQuestions,
 			ProgressTotal: totalQuestions,

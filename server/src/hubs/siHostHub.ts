@@ -90,6 +90,15 @@ export class SIHostHub {
 			return JoinGameResult.GameNotFound;
 		}
 
+		// Apply access checks before restoring or modifying any seat.
+		if (game.joinPassword && request.Password !== game.joinPassword) {
+			return JoinGameResult.WrongPassword;
+		}
+
+		if (request.Role === 'Viewer' && !game.allowViewers) {
+			return JoinGameResult.ForbiddenRole;
+		}
+
 		const userName = (request.UserName ?? '').trim();
 
 		if (!userName) {

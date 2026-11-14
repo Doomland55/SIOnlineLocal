@@ -72,7 +72,6 @@ export function getTextDuration(text: string, readingSpeed: number): number {
 /** Resolves media references of a content item. */
 export type MediaResolver = (item: ContentItem) => { type: string; value: string } | null;
 
-const OPTION_LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 /** Builds the ordered list of content atoms of a question. */
 export function buildContentAtoms(
@@ -151,7 +150,7 @@ export function buildAnswerOptions(question: Question, resolveMedia: MediaResolv
 			continue;
 		}
 
-		const label = OPTION_LABELS[i] ?? String(i + 1);
+		const label = keys[i];
 
 		if (item.type === 'text') {
 			options.push({ label, type: 'text', value: item.value });
