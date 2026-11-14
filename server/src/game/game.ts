@@ -74,6 +74,9 @@ export class Game {
 	/** Players who can press the button in the current question. */
 	private pendingPressers: number[] = [];
 
+	/** True only while oral answers are being solicited. */
+	private oralAnswerPhase = false;
+
 	/** Number of answers received in the final round. */
 	private finalAnswers = new Map<number, string>();
 
@@ -790,6 +793,13 @@ export class Game {
 		const args = text.split('\n');
 		const command = args[0];
 
+		// Do not allow decisions to advance or mutate a paused game.
+		if (this.isPaused && [
+			'CHOICE', 'I', 'ANSWER', 'ANSWER_VERSION', 'PASS', 'SET_STAKE', 'STAKE', 'VALIDATE', 'ISRIGHT', 'CONFIG',
+		].includes(command)) {
+			return;
+		}
+
 		switch (command) {
 			case 'INFO':
 				this.sendFullState(sender);
@@ -845,7 +855,7 @@ export class Game {
 				break;
 
 			case 'SETJOINMODE':
-				this.sendAll(buildMessage(GameMessage.SetJoinMode, args[1] ?? 'AnyRole', '-'));
+				// Join restrictions are not implemented; do not advertise a mode that is not enforced.
 				break;
 
 			case 'PIN':
@@ -1149,19 +1159,19 @@ export class Game {
 			return;
 		}
 
-		if (themeIndex < 0 || themeIndex >= session.themes.length) {
+		if (!Number.isInteger(themeIndex) || themeIndex < 0 || themeIndex >= session.themes.length) {
 			return;
 		}
 
 		const prices = session.themes[themeIndex].prices;
 
-		if (questionIndex < 0 || questionIndex >= prices.length || prices[questionIndex] < 0) {
+		if (!Number.isInteger(questionIndex) || questionIndex < 0 || questionIndex >= prices.length || prices[questionIndex] < 0) {
 			return;
 		}
 
 		const chooser = session.players[session.chooserIndex];
 
-		if (chooser && sender && chooser.name !== sender && !chooser.isBot) {
+		if (chooser && sender && chooser.name !== sender) {
 			// Only the chooser may select a question
 			if (session.getPlayerIndex(sender) !== session.chooserIndex) {
 				return;
@@ -1200,6 +1210,8 @@ export class Game {
 		session.answerers = [];
 		this.answeredPlayers.clear();
 		this.answersToValidate.clear();
+		this.pendingPressers = [];
+		this.oralAnswerPhase = false;
 		this.atomIndex = 0;
 		this.finalAnswers.clear();
 
@@ -1372,6 +1384,11 @@ export class Game {
 	private beginOralPhase(): void {
 		const { session } = this;
 
+		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
+			return;
+		}
+
+		this.oralAnswerPhase = true;
 		this.sendAll(buildMessage(GameMessage.OralAnswer));
 
 		// The press phase has not started yet, so everybody who has not answered is still able to answer
@@ -1443,7 +1460,7 @@ export class Game {
 	private handlePress(sender: string, _deltaTime: number): void {
 		const { session } = this;
 
-		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
+		if (this.isPaused || this.options.oral || !session.isQuestionPlaying || session.isQuestionAnswerShown || session.answererIndex >= 0) {
 			return;
 		}
 
@@ -1501,7 +1518,14 @@ export class Game {
 	private handleAnswer(sender: string, answer: string): void {
 		const index = this.session.getPlayerIndex(sender);
 
-		if (index < 0) {
+		if (index < 0 || this.isPaused || this.session.phase !== GamePhase.Round
+			|| !this.session.isQuestionPlaying || this.session.isQuestionAnswerShown
+			|| this.answeredPlayers.has(index) || this.answersToValidate.has(index)) {
+			return;
+		}
+
+		if (this.options.oral ? !this.oralAnswerPhase || !this.pendingPressers.includes(index)
+			: this.session.answererIndex !== index) {
 			return;
 		}
 
@@ -1529,6 +1553,7 @@ export class Game {
 			return;
 		}
 
+		this.answersToValidate.set(playerIndex, Date.now());
 		session.players[playerIndex].answer = answer;
 		this.sendAll(buildMessage(GameMessage.PlayerAnswer, playerIndex, answer));
 		this.sendTo(managerName, buildMessage(GameMessage.AskValidate, playerIndex, answer, '+'));
@@ -1566,8 +1591,13 @@ export class Game {
 			return;
 		}
 
+		if (this.isPaused || !this.session.isQuestionPlaying || this.session.isQuestionAnswerShown
+			|| (this.options.oral ? !this.oralAnswerPhase || !this.pendingPressers.includes(index)
+				: this.session.answererIndex !== index)) {
+			return;
+		}
+
 		this.session.players[index].answer = answer;
-		this.sendAll(buildMessage(GameMessage.PlayerAnswer, index, answer));
 	}
 
 	private isAnswerRight(answer: string): boolean {
@@ -1610,6 +1640,7 @@ export class Game {
 
 		session.players[playerIndex].answer = answer;
 		this.answeredPlayers.add(playerIndex);
+		this.pendingPressers = this.pendingPressers.filter(index => index !== playerIndex);
 		this.answersToValidate.delete(playerIndex);
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 
@@ -1722,6 +1753,8 @@ export class Game {
 		}
 
 		session.isQuestionPlaying = false;
+		this.oralAnswerPhase = false;
+		this.pendingPressers = [];
 		this.cancelPending();
 		this.restoreRoundTimer();
 
@@ -2126,6 +2159,11 @@ export class Game {
 
 	/** Handles table configuration commands (`CONFIG`). */
 	private handleConfig(person: GamePerson, args: string[]): void {
+		// Changing seat indices during play would invalidate pending game decisions.
+		if (!this.canManage(person) || this.session.phase !== GamePhase.Before) {
+			return;
+		}
+
 		const command = args[1];
 
 		switch (command) {
@@ -2258,7 +2296,6 @@ export class Game {
 				break;
 		}
 
-		void person;
 	}
 
 	private getFreeBotName(): string {
@@ -2510,7 +2547,7 @@ export class Game {
 		const answeredIndex = this.findAnswererByAnswer(subject);
 		const index = answeredIndex >= 0 ? answeredIndex : this.findAnswererByIndex(subject);
 
-		if (index < 0) {
+		if (index < 0 || !this.answersToValidate.has(index)) {
 			return;
 		}
 
