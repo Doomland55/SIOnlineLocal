@@ -92,7 +92,15 @@ export class Game {
 	/** Final decisions are kept private until the simultaneous reveal. */
 	private finalParticipants = new Map<number, FinalParticipant>();
 
-	private finalStage: 'none' | 'stake' | 'content' | 'answer' | 'reveal' = 'none';
+	private finalStage: 'none' | 'themes' | 'stake' | 'content' | 'answer' | 'reveal' = 'none';
+
+	private finalThemeRemaining = new Set<number>();
+
+	private finalDeleters: { index: number; name: string; sum: number }[] = [];
+
+	private finalDeleteTurn = 0;
+
+	private finalDeletePending = false;
 
 	/** Round timer value in tenths. */
 	private roundTimeLeft = 0;
@@ -374,11 +382,19 @@ export class Game {
 	onReconnect(personName: string): void {
 		const { session } = this;
 
-		if (!session.isQuestionPlaying) {
+		const index = session.getPlayerIndex(personName);
+
+		if (session.phase === GamePhase.Final && this.finalStage === 'themes') {
+			const deleter = this.finalDeleters[this.finalDeleteTurn % this.finalDeleters.length];
+			if (this.finalDeletePending && deleter?.index === index && deleter.name === personName) {
+				this.sendTo(personName, buildMessage(GameMessage.Choose, 2));
+			}
 			return;
 		}
 
-		const index = session.getPlayerIndex(personName);
+		if (!session.isQuestionPlaying) {
+			return;
+		}
 
 		if (session.phase === GamePhase.Final) {
 			const participant = this.finalParticipants.get(index);
@@ -717,7 +733,8 @@ export class Game {
 			? GameStage.Before
 			: session.phase === GamePhase.Finished ? GameStage.After : GameStage.Round;
 
-		const text = buildMessage(GameMessage.Stage, stage, session.roundName, session.roundIndex, 'SelectByPlayer');
+		const rules = session.phase === GamePhase.Final ? 'RemoveOtherThemes' : 'SelectByPlayer';
+		const text = buildMessage(GameMessage.Stage, stage, session.roundName, session.roundIndex, rules);
 
 		if (personName) {
 			this.sendTo(personName, text);
@@ -731,17 +748,29 @@ export class Game {
 		const { session } = this;
 		const roundsNames = session.packageInfo.package.rounds.map(round => round.name);
 		const roundsText = [GameMessage.RoundsNames, ...roundsNames].join('\n');
-		const themesText = [GameMessage.RoundThemes2, 'OneByOne', ...session.themes.map(theme => theme.name)].join('\n');
+		const themesMode = session.phase === GamePhase.Final ? 'AllTogether' : 'OneByOne';
+		const themesText = [GameMessage.RoundThemes2, themesMode, ...session.themes.map(theme => theme.name)].join('\n');
 
 		if (personName) {
 			this.sendTo(personName, roundsText);
 			this.sendTo(personName, themesText);
+			if (session.phase === GamePhase.Final) {
+				session.themes.forEach((_theme, index) => {
+					if (!this.finalThemeRemaining.has(index)) {
+						this.sendTo(personName, buildMessage(GameMessage.Out, index));
+					}
+				});
+				return;
+			}
 			session.themes.forEach((theme, index) => this.sendTheme(personName, index, theme));
 			return;
 		}
 
 		this.sendAll(roundsText);
 		this.sendAll(themesText);
+		if (session.phase === GamePhase.Final) {
+			return;
+		}
 		session.themes.forEach((theme, index) => this.sendTheme(undefined, index, theme));
 	}
 
@@ -823,7 +852,7 @@ export class Game {
 
 		// Do not allow decisions to advance or mutate a paused game.
 		if (this.isPaused && [
-			'CHOICE', 'I', 'ANSWER', 'ANSWER_VERSION', 'PASS', 'SET_STAKE', 'STAKE', 'VALIDATE', 'ISRIGHT', 'CONFIG',
+			'CHOICE', 'I', 'ANSWER', 'ANSWER_VERSION', 'PASS', 'SET_STAKE', 'STAKE', 'VALIDATE', 'ISRIGHT', 'CONFIG', 'DELETE',
 		].includes(command)) {
 			return;
 		}
@@ -906,12 +935,15 @@ export class Game {
 				this.handleValidation(person, args);
 				break;
 
+			case 'DELETE':
+				this.handleFinalThemeDelete(sender, /^\d+$/.test(args[1] ?? '') ? Number(args[1]) : NaN);
+				break;
+
 			case 'SETHOST':
 			case 'BAN':
 			case 'UNBAN':
 			case 'MARK':
 			case 'REPORT':
-			case 'DELETE':
 			case 'TOGGLE':
 			case 'LEADERBOARD':
 			case 'CHANGE':
@@ -1917,19 +1949,100 @@ export class Game {
 			prices: theme.questions.map(question => question.price),
 		}));
 
-		this.sendAll(buildMessage(GameMessage.Stage, GameStage.Round, round.name, roundIndex, 'Sequential'));
+		this.finalThemeRemaining = new Set(session.themes
+			.map((theme, index) => (theme.prices.some(price => price >= 0) ? index : -1))
+			.filter(index => index >= 0));
+		this.finalDeleters = session.players
+			.map((player, index) => ({ index, name: player.name, sum: player.sum, active: this.isActiveSeat(player) }))
+			.filter(player => player.active && Number.isSafeInteger(player.sum) && player.sum > 0)
+			.sort((a, b) => a.sum - b.sum || a.index - b.index);
+		// Rotate the ascending score order so the highest-scoring player has the last deletion.
+		if (this.finalDeleters.length > 0) {
+			const deletions = Math.max(0, this.finalThemeRemaining.size - 1);
+			const offset = (this.finalDeleters.length - deletions % this.finalDeleters.length) % this.finalDeleters.length;
+			this.finalDeleters = [...this.finalDeleters.slice(offset), ...this.finalDeleters.slice(0, offset)];
+		}
+		this.finalDeleteTurn = 0;
+		this.finalDeletePending = false;
+		this.finalStage = 'themes';
+
+		this.sendAll(buildMessage(GameMessage.Stage, GameStage.Round, round.name, roundIndex, 'RemoveOtherThemes'));
 		this.sendRoundInfo();
-		this.sendTable();
+		for (let index = 0; index < session.themes.length; index += 1) {
+			if (!this.finalThemeRemaining.has(index)) {
+				this.sendAll(buildMessage(GameMessage.Out, index));
+			}
+		}
 		this.notifyChanged();
 
-		this.schedule(2, () => this.startFinalQuestion());
+		if (this.finalDeleters.length === 0 || this.finalThemeRemaining.size === 0) {
+			this.endGame();
+			return;
+		}
+		this.schedule(2, () => this.askToDeleteFinalTheme());
+	}
+
+	/** Gives each eligible player a turn; an idle or absent player is handled by a bounded fallback. */
+	private askToDeleteFinalTheme(): void {
+		if (this.session.phase !== GamePhase.Final || this.finalStage !== 'themes') {
+			return;
+		}
+		if (this.finalThemeRemaining.size <= 1) {
+			this.startFinalQuestion();
+			return;
+		}
+
+		this.finalDeletePending = true;
+		const turn = this.finalDeleteTurn;
+		const deleter = this.finalDeleters[turn % this.finalDeleters.length];
+		const player = this.session.players[deleter.index];
+		this.session.chooserIndex = deleter.index;
+		this.sendAll(buildMessage(GameMessage.SetChooser, deleter.index, '+', '-', 'ANNOUNCE'));
+		if (player?.name === deleter.name && player.isHuman && player.isConnected) {
+			this.sendTo(deleter.name, buildMessage(GameMessage.Choose, 2));
+		}
+		const seconds = player?.name === deleter.name && player.isBot ? 1.5 : this.getTimeSettings().timeForChoosingFinalTheme;
+		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', seconds * 10, deleter.index));
+		this.schedule(seconds, () => {
+			if (this.session.phase === GamePhase.Final && this.finalStage === 'themes' && this.finalDeleteTurn === turn) {
+				const remaining = [...this.finalThemeRemaining];
+				this.deleteFinalTheme(remaining[Math.floor(Math.random() * remaining.length)]);
+			}
+		});
+	}
+
+	private handleFinalThemeDelete(sender: string, index: number): void {
+		if (this.isPaused || this.session.phase !== GamePhase.Final || this.finalStage !== 'themes'
+			|| !this.finalDeletePending || !Number.isInteger(index) || !this.finalThemeRemaining.has(index)) {
+			return;
+		}
+		const deleter = this.finalDeleters[this.finalDeleteTurn % this.finalDeleters.length];
+		if (!deleter || deleter.name !== sender || this.session.getPlayerIndex(sender) !== deleter.index) {
+			return;
+		}
+		this.deleteFinalTheme(index);
+	}
+
+	private deleteFinalTheme(index: number): void {
+		if (!this.finalThemeRemaining.has(index) || this.finalThemeRemaining.size <= 1) {
+			return;
+		}
+		const deleter = this.finalDeleters[this.finalDeleteTurn % this.finalDeleters.length];
+		this.finalDeletePending = false;
+		this.sendTo(deleter.name, buildMessage(GameMessage.Cancel));
+		this.finalThemeRemaining.delete(index);
+		this.finalDeleteTurn += 1;
+		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
+		this.sendAll(buildMessage(GameMessage.Out, index));
+		// Wait for the client deletion animation before enabling another selection.
+		this.schedule(1, () => this.askToDeleteFinalTheme());
 	}
 
 	/** Plays the final question: every player stakes and answers. */
 	private startFinalQuestion(): void {
 		const { session } = this;
 
-		const themeIndex = session.themes.findIndex(theme => theme.prices.some(price => price >= 0));
+		const themeIndex = [...this.finalThemeRemaining][0] ?? -1;
 
 		if (themeIndex < 0) {
 			this.endGame();
@@ -2676,6 +2789,7 @@ export class Game {
 	private getTimeSettings() {
 		return {
 			timeForChoosingQuestion: 60,
+			timeForChoosingFinalTheme: 30,
 			timeForThinkingOnQuestion: 30,
 			timeForMakingStake: 30,
 			timeForFinalThinking: 60,
