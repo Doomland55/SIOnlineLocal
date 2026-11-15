@@ -1632,6 +1632,11 @@ export class Game {
 			return;
 		}
 
+		// An answer ends the oral answering phase. Its deadline and bot actions must not
+		// finish the question while a human showman is deciding on this answer.
+		this.oralAnswerPhase = false;
+		this.cancelPending(true);
+		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 		this.answersToValidate.set(playerIndex, Date.now());
 		session.players[playerIndex].answer = answer;
 		this.sendAll(buildMessage(GameMessage.PlayerAnswer, playerIndex, answer));
@@ -2767,7 +2772,8 @@ export class Game {
 	private findAnswererByAnswer(answer: string): number {
 		const normalized = this.normalizeAnswer(answer);
 
-		return this.session.players.findIndex(player => this.normalizeAnswer(player.answer) === normalized
+		return this.session.players.findIndex((player, index) => this.answersToValidate.has(index)
+			&& this.normalizeAnswer(player.answer) === normalized
 			&& (player.isHuman || player.isBot)
 			&& player.name.trim().length > 0);
 	}

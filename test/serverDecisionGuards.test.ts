@@ -61,6 +61,34 @@ describe('Server decision guards', () => {
 		expect(game.session.answererIndex).toBe(0);
 	});
 
+	it.each(['+', '-'])('waits indefinitely for the live showman to validate an oral answer (%s)', sign => {
+		Object.assign(game.session.showman, { name: 'Host', role: PersonRole.Showman, isHuman: true,
+			isConnected: true, isBot: false });
+		const hostMessages: string[] = [];
+		game.attachConnection('Host', { send: (_target, message: any) => hostMessages.push(message.Text), sendClose: () => {} });
+		game.handleClientMessage('Host', 'SET_OPTIONS\nOral\ntrue');
+		game.setTimeSettings({ timeForThinkingOnQuestion: 5, timeOfRound: 10 });
+		startQuestion();
+		game.handleClientMessage('Alice', 'ANSWER\nyes');
+		expect(hostMessages).toContain('ASK_VALIDATE\n0\nyes\n+');
+		expect(received).toContain('TIMER\n2\nSTOP');
+		game.handleClientMessage('Bob', 'ANSWER\nyes');
+		jest.advanceTimersByTime(60000);
+		expect(game.session.isQuestionPlaying).toBe(true);
+		expect(game.session.players[0].sum).toBe(0);
+		expect(game.session.players[1].sum).toBe(0);
+		expect(hostMessages.filter(text => text.startsWith('ASK_VALIDATE'))).toHaveLength(1);
+		game.handleClientMessage('Host', `VALIDATE\nyes\n${sign}\n1`);
+		expect(game.session.players[0].sum).toBe(sign === '+' ? 100 : -100);
+		if (sign === '-') {
+			jest.advanceTimersByTime(1000);
+			game.handleClientMessage('Bob', 'ANSWER\nyes');
+			expect(hostMessages.filter(text => text.startsWith('ASK_VALIDATE'))).toHaveLength(2);
+			game.handleClientMessage('Host', 'VALIDATE\nyes\n+\n1');
+			expect(game.session.players[1].sum).toBe(100);
+		}
+	});
+
 	it('restricts table configuration to the manager before the game', () => {
 		game.handleClientMessage('Viewer', 'CONFIG\nDELETETABLE\n0');
 		expect(game.session.players).toHaveLength(2);
