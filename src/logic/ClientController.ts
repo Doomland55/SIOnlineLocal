@@ -1783,7 +1783,7 @@ export default class ClientController implements IClientController {
 		this.initQuestion();
 		this.appDispatch(showObject({ header: theme.name, text: questionPrice, hint: '', large: true, animate: false }));
 		this.appDispatch(captionChanged(`${theme.name}, ${questionPrice}`));
-		this.dispatch(roomActionCreators.currentPriceChanged(questionPrice));
+		this.dispatch(roomActionCreators.currentPriceChanged(Number(questionPrice)));
 	}
 
 	onTimerMaximumChanged(timerIndex: number, maximum: number) {
@@ -1820,6 +1820,11 @@ export default class ClientController implements IClientController {
 		this.appDispatch(stopTimer(timerIndex));
 
 		if (timerIndex === 2) {
+			if (this.getState().room2.stage.decisionType === DecisionType.Answer) {
+				this.appDispatch(setDecisionType(DecisionType.None));
+				this.appDispatch(setContext(ContextView.None));
+				this.appDispatch(isSelectableChanged(false));
+			}
 			this.appDispatch(setShowMainTimer(false));
 			this.appDispatch(clearDecisions());
 			this.appDispatch(stopAudio());
@@ -1974,6 +1979,11 @@ export default class ClientController implements IClientController {
 	}
 
 	onQuestionEnd() {
+		if (this.getState().room2.stage.decisionType === DecisionType.Answer) {
+			this.appDispatch(setDecisionType(DecisionType.None));
+			this.appDispatch(setContext(ContextView.None));
+			this.appDispatch(isSelectableChanged(false));
+		}
 		this.dispatch(roomActionCreators.afterQuestionStateChanged(true));
 		this.dispatch(roomActionCreators.isQuestionChanged(false, ''));
 		this.appDispatch(endQuestion());

@@ -149,6 +149,12 @@ async function main() {
 	assert.ok(settingsNumber(pin) >= 100000, 'пин должен быть шестизначным');
 	console.log(`  PIN: ${settingsNumber(pin)}`);
 
+	// Keep another person in the room while the player reconnects: an empty room is deleted.
+	const viewer = createConnection();
+	await viewer.start();
+	const viewerResult = await viewer.invoke('JoinGame2', { ...joinRequest, UserName: `${userName} viewer`, Role: 'Viewer' });
+	assert.strictEqual(viewerResult, 'Success', 'зритель должен войти в комнату');
+
 	// A reload of the page reconnects with the same name and must get the full state back
 	await connection.stop();
 	received.length = 0;
@@ -162,6 +168,7 @@ async function main() {
 	console.log('  reconnect -> full state restored');
 
 	await connection.stop();
+	await viewer.stop();
 	console.log('\nSignalR client test passed.');
 }
 

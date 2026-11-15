@@ -20,6 +20,7 @@ import Path from '../src/model/enums/Path';
 import Role from '../src/client/models/Role';
 import * as globalActions from '../src/state/globalActions';
 import localization from '../src/model/resources/localization';
+import { DecisionType } from '../src/state/room2Slice';
 
 describe('ClientController - Game Initialization Flow', () => {
 	let controller: ClientController;
@@ -471,6 +472,15 @@ describe('ClientController - Round Flow', () => {
 			expect(actions).toContain('table/setRoundThemes');
 			expect(actions).toContain('table/showThemeStack');
 		});
+	});
+
+	it('closes the answer input when its timer stops and keeps question prices numeric', () => {
+		controller.onAskAnswer('text');
+		expect(state.room2.stage.decisionType).toBe(DecisionType.Answer);
+		controller.onTimerStop(2);
+		expect(state.room2.stage.decisionType).toBe(DecisionType.None);
+		controller.onQuestion('725');
+		expect(state.room.stage.currentPrice).toBe(725);
 	});
 
 	describe('onTable', () => {

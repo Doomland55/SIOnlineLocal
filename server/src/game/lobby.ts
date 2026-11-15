@@ -175,6 +175,12 @@ export class Lobby implements GameObserver {
 		game.setServerTimeSettings(this.options.timeSettings);
 
 		this.games.set(id, game);
+		// Creation and joining are separate requests. Give the creator time to join,
+		// but do not leave abandoned, never-joined rooms in the lobby forever.
+		const cleanup = setTimeout(() => {
+			if (this.games.get(id) === game && game.isEmpty) this.removeGame(id);
+		}, 60000);
+		cleanup.unref();
 		this.notifyGameCreated(game);
 		this.options.log(`Создана игра ${id} «${game.session.name}» (пакет ${loaded.fileName})`);
 

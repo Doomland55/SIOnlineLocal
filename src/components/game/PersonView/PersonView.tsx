@@ -53,7 +53,6 @@ export function PersonView(props: PersonViewProps): JSX.Element {
 	const isConnected = useAppSelector(state => state.common.isSIHostConnected);
 	const name = useAppSelector(state => state.room2.name);
 	const persons = useAppSelector(state => state.room2.persons);
-	const stage = useAppSelector(state => state.room2.stage);
 	const windowWidth = useAppSelector(state => state.ui.windowWidth);
 	let seatPerson = null;
 
@@ -68,8 +67,7 @@ export function PersonView(props: PersonViewProps): JSX.Element {
 	const isMe = personName === name;
 	const isHost = personName === persons.hostName;
 	const isWide = windowWidth >= Constants.WIDE_WINDOW_WIDTH;
-	const isSeatEditingAllowed = !stage.isGameStarted || stage.isEditingTables;
-	const canManageSeat = Boolean(props.seat && !isWide && name === persons.hostName && isConnected && isSeatEditingAllowed);
+	const canManageSeat = Boolean(props.seat && !isWide && name === persons.hostName && isConnected);
 
 	const avatar = isMe ? props.avatar : props.account?.avatar ?? null;
 	const canManagePerson = Boolean(props.account && persons.hostName === name && !isMe && props.account.isHuman);

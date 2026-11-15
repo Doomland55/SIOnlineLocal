@@ -2,7 +2,7 @@ import { Question } from '../../../src/model/siquester/package';
 import { buildMessage, escapeNewLines, GameMessage, GameStage, MediaCategory, SERVER_HOST_PLACEHOLDER } from '../protocol';
 import { AnswerOptionPlan, buildAnswerOptions, buildContentAtoms, ContentAtom, getAnswerContentAtoms } from './questionPlan';
 import { getMediaUrl, LoadedPackage, MEDIA_ROUTE_PREFIX, resolveMediaPath } from './package';
-import { GamePerson, GamePhase, GameSession, isEmptySlotName, PersonRole } from './session';
+import { GamePerson, GamePhase, GameSession, isEmptySlotName, MAX_PLAYER_COUNT, PersonRole } from './session';
 
 /** Callback used by the game to report its state to the outside world. */
 export interface GameObserver {
@@ -113,6 +113,14 @@ export class Game {
 
 	/** The round deadline is independent of question-level steps. */
 	private roundStep: PendingStep | null = null;
+
+	/** Invalidates callbacks from earlier chooser turns. */
+	private choiceTurn = 0;
+
+	private choosingQuestion = false;
+
+	/** Seat edits that would invalidate an active question are applied after it ends. */
+	private pendingSeatEdits: { person: GamePerson; args: string[]; target: GamePerson }[] = [];
 
 	private roundExpired = false;
 
@@ -1155,6 +1163,8 @@ export class Game {
 		this.sendChooser();
 
 		const chooser = session.players[session.chooserIndex];
+		const turn = ++this.choiceTurn;
+		this.choosingQuestion = true;
 
 		if (!chooser) {
 			this.endRound('empty');
@@ -1163,7 +1173,11 @@ export class Game {
 
 		if (chooser.isBot || !chooser.isConnected) {
 			this.sendAll(buildMessage(GameMessage.SetChooser, session.chooserIndex, '+', '-', 'ANNOUNCE'));
-			this.schedule(1.5, () => this.makeBotChoice());
+			this.schedule(1.5, () => {
+				if (this.choiceTurn === turn && session.phase === GamePhase.Round && !session.isQuestionPlaying && !this.closingQuestion) {
+					this.makeBotChoice();
+				}
+			});
 			return;
 		}
 
@@ -1174,7 +1188,8 @@ export class Game {
 		// Fallback: bot-like selection if the chooser is idle
 		const expectedRound = session.roundIndex;
 		this.schedule(this.getTimeSettings().timeForChoosingQuestion, () => {
-			if (this.session.roundIndex === expectedRound && this.session.themeIndex < 0) {
+			if (this.choiceTurn === turn && this.session.phase === GamePhase.Round
+				&& this.session.roundIndex === expectedRound && !session.isQuestionPlaying && !this.closingQuestion) {
 				this.makeBotChoice();
 			}
 		});
@@ -1248,6 +1263,8 @@ export class Game {
 		}
 
 		const price = prices[questionIndex];
+		this.choiceTurn += 1;
+		this.choosingQuestion = false;
 		this.closingQuestion = true; // A selected question must play even if the round time expires during the transition.
 		prices[questionIndex] = -1;
 
@@ -1769,7 +1786,7 @@ export class Game {
 	}
 
 	private getPenaltyAmount(): number {
-		return this.session.currentPrice;
+		return this.session.currentQuestion?.type === 'noRisk' ? 0 : this.session.currentPrice;
 	}
 
 	/** Shows the right answer. */
@@ -1837,6 +1854,7 @@ export class Game {
 
 	private finishQuestionWithoutAnswer(): void {
 		this.sendAll(buildMessage(GameMessage.Timer, 1, 'STOP'));
+		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 		this.showRightAnswer();
 		this.finishQuestion(null);
 	}
@@ -1867,6 +1885,7 @@ export class Game {
 			this.notifyChanged();
 
 			this.closingQuestion = false;
+			this.applyPendingSeatEdits();
 			if (this.roundExpired) {
 				this.endRound('timeout');
 				return;
@@ -1904,7 +1923,10 @@ export class Game {
 		}
 
 		session.isQuestionPlaying = false;
+		this.choosingQuestion = false;
+		this.choiceTurn += 1;
 		this.cancelPending();
+		this.applyPendingSeatEdits();
 
 		this.sendAll(buildMessage(GameMessage.Stop));
 		this.sendSums();
@@ -2357,20 +2379,46 @@ export class Game {
 		return winner;
 	}
 
+	/** Apply edits by seat identity, not by indices that earlier edits may have changed. */
+	private applyPendingSeatEdits(): void {
+		const pending = this.pendingSeatEdits.splice(0);
+		for (const edit of pending) {
+			const index = this.session.players.indexOf(edit.target);
+			if (edit.target !== this.session.showman && index < 0) continue;
+			const args = [...edit.args];
+			if (args[1] === 'DELETETABLE') args[2] = String(index);
+			else if (args[2] === 'player') args[3] = String(index);
+			this.handleConfig(edit.person, args, true);
+		}
+	}
+
+	/** A displaced connected human stays in the room as a viewer. */
+	private moveSeatOccupantToViewers(target: GamePerson): void {
+		if (target.isHuman && target.isConnected && !isEmptySlotName(target.name)) {
+			this.session.viewers.push({ ...target, role: PersonRole.Viewer, sum: 0, stake: 0, answer: '' });
+		}
+	}
+
 	/** Handles table configuration commands (`CONFIG`). */
-	private handleConfig(person: GamePerson, args: string[]): void {
-		// Changing seat indices during play would invalidate pending game decisions.
-		if (!this.canManage(person) || this.session.phase !== GamePhase.Before) {
+	private handleConfig(person: GamePerson, args: string[], applyingPending = false): void {
+		if (!applyingPending && !this.canManage(person)) return;
+		const command = args[1];
+		// Final-round decisions retain player indices until the end of the game.
+		if (this.session.phase === GamePhase.Final) return;
+		if (!applyingPending && command !== 'ADDTABLE'
+			&& this.session.phase === GamePhase.Round && (this.session.isQuestionPlaying || this.closingQuestion)) {
+			const index = Number(command === 'DELETETABLE' ? args[2] : args[3]);
+			const target = command === 'DELETETABLE' || args[2] === 'player'
+				? this.session.players[index] : this.session.showman;
+			if (target && ['DELETETABLE', 'FREE', 'CHANGETYPE', 'SET'].includes(command)) {
+				this.pendingSeatEdits.push({ person, args: [...args], target });
+			}
 			return;
 		}
 
-		const command = args[1];
-
 		switch (command) {
 			case 'ADDTABLE': {
-				if (this.session.phase !== GamePhase.Before) {
-					return;
-				}
+				if (this.session.players.length >= MAX_PLAYER_COUNT) return;
 
 				const botName = this.getFreeBotName();
 
@@ -2390,9 +2438,12 @@ export class Game {
 
 				const index = this.session.players.length - 1;
 				this.sendAll([GameMessage.Config, 'ADDTABLE', botName, '+', '+', '-', '+'].join('\n'));
-				this.sendInfo();
+				if (this.session.phase === GamePhase.Before) {
+					this.sendInfo();
+				} else {
+					this.sendAll(buildMessage(GameMessage.Config, 'CHANGETYPE', 'player', index, '-', botName, this.session.players[index].isMale ? '+' : '-'));
+				}
 				this.sendAll(buildMessage(GameMessage.PlayerCount, this.session.players.length));
-				void index;
 				this.notifyChanged();
 				break;
 			}
@@ -2400,10 +2451,21 @@ export class Game {
 			case 'DELETETABLE': {
 				const index = parseInt(args[2], 10);
 
-				if (index >= 0 && index < this.session.players.length) {
+				if (index >= 0 && index < this.session.players.length && this.session.players.length > 1) {
+					this.moveSeatOccupantToViewers(this.session.players[index]);
 					this.session.players.splice(index, 1);
+					if (this.session.chooserIndex === index) this.session.chooserIndex = -1;
+					else if (this.session.chooserIndex > index) this.session.chooserIndex -= 1;
+					for (const [name, seat] of this.leftSeats) {
+						if (seat.role !== PersonRole.Player) continue;
+						if (seat.index === index) this.leftSeats.delete(name);
+						else if (seat.index > index) seat.index -= 1;
+					}
 					this.sendAll(buildMessage(GameMessage.Config, 'DELETETABLE', index));
-					this.sendInfo();
+					if (this.session.phase === GamePhase.Before) this.sendInfo();
+					this.sendAll(buildMessage(GameMessage.PlayerCount, this.session.players.length));
+					this.sendSums();
+					this.updateManagerName();
 					this.notifyChanged();
 				}
 
@@ -2419,6 +2481,7 @@ export class Game {
 					return;
 				}
 
+				this.moveSeatOccupantToViewers(target);
 				target.name = GameSession.EMPTY_NAME;
 				target.isHuman = false;
 				target.isBot = false;
@@ -2426,7 +2489,8 @@ export class Game {
 				target.isReady = false;
 
 				this.sendAll(buildMessage(GameMessage.Config, 'FREE', isPlayer ? 'player' : 'showman', isPlayer ? index : ''));
-				this.sendInfo();
+				if (this.session.phase === GamePhase.Before) this.sendInfo();
+				this.updateManagerName();
 				this.notifyChanged();
 				break;
 			}
@@ -2440,6 +2504,7 @@ export class Game {
 					return;
 				}
 
+				this.moveSeatOccupantToViewers(target);
 				const isHuman = args[4] === '+';
 				const name = isHuman ? GameSession.EMPTY_NAME : this.getFreeBotName();
 
@@ -2459,7 +2524,8 @@ export class Game {
 					target.isMale ? '+' : '-',
 				].join('\n'));
 
-				this.sendInfo();
+				if (this.session.phase === GamePhase.Before) this.sendInfo();
+				this.updateManagerName();
 				this.notifyChanged();
 				break;
 			}
@@ -2473,6 +2539,7 @@ export class Game {
 					return;
 				}
 
+				this.moveSeatOccupantToViewers(target);
 				target.name = args[4] ?? GameSession.EMPTY_NAME;
 				target.isHuman = false;
 				target.isBot = true;
@@ -2487,13 +2554,19 @@ export class Game {
 					target.isMale ? '+' : '-',
 				].join('\n'));
 
-				this.sendInfo();
+				if (this.session.phase === GamePhase.Before) this.sendInfo();
+				this.updateManagerName();
 				this.notifyChanged();
 				break;
 			}
 
 			default:
 				break;
+		}
+
+		if (!applyingPending && this.session.phase === GamePhase.Round && this.choosingQuestion
+			&& !this.session.isQuestionPlaying && !this.closingQuestion && command !== 'ADDTABLE') {
+			this.askToSelectQuestion();
 		}
 
 	}
@@ -2547,6 +2620,9 @@ export class Game {
 
 		this.cancelPending();
 		session.isQuestionPlaying = false;
+		this.choosingQuestion = false;
+		this.choiceTurn += 1;
+		this.applyPendingSeatEdits();
 
 		if (session.packageInfo.package.rounds[roundIndex]?.type === 'final') {
 			this.startFinalRound(roundIndex);
@@ -2561,6 +2637,9 @@ export class Game {
 
 		this.cancelPending();
 		session.isQuestionPlaying = false;
+		this.choosingQuestion = false;
+		this.choiceTurn += 1;
+		if (session.phase === GamePhase.Round) this.applyPendingSeatEdits();
 
 		const nextIndex = session.roundIndex + 1;
 

@@ -89,14 +89,16 @@ describe('Server decision guards', () => {
 		}
 	});
 
-	it('restricts table configuration to the manager before the game', () => {
+	it('restricts table configuration to the manager during the game', () => {
 		game.handleClientMessage('Viewer', 'CONFIG\nDELETETABLE\n0');
 		expect(game.session.players).toHaveLength(2);
 		game.handleClientMessage('Alice', 'CONFIG\nADDTABLE');
 		expect(game.session.players).toHaveLength(3);
 		game.startRound(0);
-		game.handleClientMessage('Alice', 'CONFIG\nDELETETABLE\n0');
+		game.handleClientMessage('Viewer', 'CONFIG\nDELETETABLE\n0');
 		expect(game.session.players).toHaveLength(3);
+		game.handleClientMessage('Alice', 'CONFIG\nDELETETABLE\n1');
+		expect(game.session.players).toHaveLength(2);
 		expect(game.session.phase).toBe(GamePhase.Round);
 	});
 

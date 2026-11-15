@@ -62,7 +62,11 @@ export class SIHostHub {
 
 		if (game) {
 			game.detachConnection(connection);
-			this.lobby.onGamePersonsChanged(game);
+			if (game.isEmpty) {
+				this.lobby.removeGame(game.id);
+			} else {
+				this.lobby.onGamePersonsChanged(game);
+			}
 		}
 
 		this.games.delete(connection);
@@ -285,6 +289,11 @@ export class SIHostHub {
 
 		if (previous && previous !== game) {
 			previous.detachConnection(connection);
+			if (previous.isEmpty) {
+				this.lobby.removeGame(previous.id);
+			} else {
+				this.lobby.onGamePersonsChanged(previous);
+			}
 		}
 
 		this.joins.set(connection, { gameId: game.id, personName });
