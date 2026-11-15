@@ -73,6 +73,7 @@ describe('Server decision guards', () => {
 		expect(hostMessages).toContain('ASK_VALIDATE\n0\nyes\n+');
 		expect(received).toContain('TIMER\n2\nSTOP');
 		game.handleClientMessage('Bob', 'ANSWER\nyes');
+		game.handleClientMessage('Host', 'MOVE\n1');
 		jest.advanceTimersByTime(60000);
 		expect(game.session.isQuestionPlaying).toBe(true);
 		expect(game.session.players[0].sum).toBe(0);

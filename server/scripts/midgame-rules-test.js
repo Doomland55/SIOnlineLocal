@@ -59,7 +59,7 @@ async function waitFor(messages, predicate, timeout = 25000, description = '') {
 }
 
 /** Creates a game with a live showman and the given live player seats. */
-async function createGame(showmanName, playerNames) {
+async function createGame(showmanName, playerNames, appSettings = {}) {
 	const packages = await fetch(`${baseUrl}/api/v1/packages`).then(response => response.json());
 
 	assert.ok(packages.length > 0, 'в библиотеке должен быть хотя бы один пакет');
@@ -78,7 +78,7 @@ async function createGame(showmanName, playerNames) {
 				showman: { name: showmanName, isHuman: true },
 				players: playerNames.map(name => ({ name, isHuman: true })),
 				viewers: [],
-				appSettings: { readingSpeed: 20, timeSettings: {} },
+				appSettings: { readingSpeed: 20, timeSettings: {}, ...appSettings },
 			},
 			packageInfo: { type: 1, uri: packages[0].uri, contentServiceUri: null, secret: null, source: null },
 			computerAccounts: [],
@@ -137,7 +137,7 @@ async function playQuestion(host, player, themeIndex, questionIndex) {
 async function main() {
 	const showmanName = 'Ведущий';
 	const playerName = 'Игрок';
-	const gameId = await createGame(showmanName, [playerName]);
+	const gameId = await createGame(showmanName, [playerName], { oral: true, falseStart: true, readingSpeed: 33, timeSettings: { partialImageTime: 7 } });
 
 	const host = await connect(showmanName);
 	const player = await connect(playerName);
@@ -145,6 +145,13 @@ async function main() {
 	try {
 		await startGame(host, gameId);
 		await joinPlayer(player, gameId);
+
+		// Creation rules are sent through the real REST + SignalR path to late joiners.
+		const initial = await waitFor(player.messages, text => text.startsWith('OPTIONS2') && text.includes('Oral'), 15000, 'начальных правил');
+		for (const pair of ['Oral\ntrue', 'FalseStart\ntrue', 'ReadingSpeed\n33', 'PartialImage\n7']) {
+			assert.ok(initial.includes(pair), `начальное правило ${pair} отсутствует: ${initial}`);
+		}
+		console.log('  initial game rules reach the joined player');
 
 		// 1. Rules changed during the game reach every participant under the names the client knows
 		player.messages.length = 0;
@@ -190,7 +197,9 @@ async function main() {
 		await waitFor(host.messages, text => text.startsWith('QUESTION_END'), 25000, 'окончания вопроса');
 		player.messages.length = 0;
 		host.messages.length = 0;
-		await playQuestion(host, player, 0, 1);
+		await waitFor(host.messages, text => text === 'CHOOSE\n1', 25000, 'выбора вопроса ведущим');
+		await host.send('CHOICE\n0\n1');
+		await waitFor(player.messages, text => text.startsWith('QUESTION\n'), 25000, 'вопроса, выбранного ведущим');
 		await waitFor(player.messages, text => text === 'TRY', 25000, 'фазы нажатия кнопки');
 
 		player.messages.length = 0;

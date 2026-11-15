@@ -138,10 +138,11 @@ async function main() {
 	assert.strictEqual(chat[0]?.Text, 'Привет из теста', 'чат должен дойти до игрока');
 	console.log('  chat delivered');
 
-	// Moving to the next round is what the "next" button of the side panel does
+	// The next button completes the current step instead of jumping to another round.
+	await waitFor('CHOOSE\n1');
 	await sendMessage(connection, 'MOVE\n1', gameClient, userName);
-	await waitFor('STAGE\nRound');
-	console.log('  MOVE -> next round');
+	await waitFor('CHOICE\n');
+	console.log('  MOVE -> current choice completed');
 
 	// The pin code is shown to the host so that other players could join
 	await sendMessage(connection, 'PIN', gameClient, userName);

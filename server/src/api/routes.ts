@@ -348,6 +348,7 @@ export function registerRoutes(
 			game.session.showman.isBot = !showmanIsHuman;
 			game.session.showman.isMale = settings.showman?.isMale !== false;
 			game.setTimeSettings(settings.appSettings?.timeSettings as Record<string, number> | undefined);
+			game.setInitialOptions(settings.appSettings);
 
 			// Computer accounts from the game settings fill the remaining seats as bots
 			(settings.players ?? [])

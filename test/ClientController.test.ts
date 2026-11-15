@@ -1233,6 +1233,19 @@ describe('ClientController - Timer Operations', () => {
 			expect(actions).toContain('room2/pauseTimer');
 		});
 
+		it('preserves the elapsed value of all running timers across pause and resume', () => {
+			(mockAppDispatch as jest.Mock).mockImplementation((action: AnyAction) => { state = reducer(state, action); return action; });
+			controller.onTimerRun(0, 600, null);
+			controller.onTimerRun(1, 100, null);
+			controller.onTimerRun(2, 80, 0);
+			controller.onPause(true, [35, 20, 10]);
+			expect([state.room2.timers.round.value, state.room2.timers.press.value, state.room2.timers.decision.value])
+				.toEqual([35, 20, 10]);
+			controller.onPause(false, [0, 0, 0]);
+			expect([state.room2.timers.round.value, state.room2.timers.press.value, state.room2.timers.decision.value])
+				.toEqual([35, 20, 10]);
+		});
+
 		it('should resume game', () => {
 			controller.onPause(false, [100, 200, 300]);
 

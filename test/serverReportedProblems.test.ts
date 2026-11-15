@@ -41,6 +41,142 @@ describe('Reported game regressions', () => {
 	beforeEach(() => jest.useFakeTimers({ doNotFake: ['performance'] } as any));
 	afterEach(() => { game?.dispose(); jest.useRealTimers(); });
 
+	it('initializes and broadcasts the room rules provided at creation', () => {
+		start([question()]);
+		game.setInitialOptions({ oral: true, managed: true, falseStart: true, partialText: true,
+			partialImages: true, useApellations: true, displayAnswerOptionsLabels: false, readingSpeed: 47,
+			timeSettings: { partialImageTime: 9 } });
+		game.setTimeSettings({ timeForBlockingButton: 8 });
+		game.sendOptions('Alice');
+		const options = messages.Alice.filter(text => text.startsWith('OPTIONS2')).pop()!;
+		for (const pair of ['Oral\ntrue', 'Managed\ntrue', 'FalseStart\ntrue', 'PartialText\ntrue',
+			'PartialImages\ntrue', 'UseAppellations\ntrue', 'DisplayAnswerOptionsLabels\nfalse',
+			'ReadingSpeed\n47', 'PartialImage\n9', 'ButtonBlocking\n8']) expect(options).toContain(pair);
+		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
+		jest.advanceTimersByTime(5000);
+		expect(messages.Alice).toContain('ORAL_ANSWER');
+	});
+
+	it('freezes choice and round timers with elapsed values and continues after resume', () => {
+		start([question(), question()]);
+		jest.advanceTimersByTime(4000);
+		game.handleClientMessage('Host', 'PAUSE\n+');
+		const pause = messages.Alice.filter(text => text.startsWith('PAUSE\n+')).pop()!.split('\n').slice(2).map(Number);
+		expect(pause).toEqual([50, 0, 40]);
+		jest.advanceTimersByTime(60000);
+		expect(game.session.themeIndex).toBe(-1);
+		game.handleClientMessage('Host', 'PAUSE\n-');
+		expect(messages.Alice).toContain('PAUSE\n-\n0\n0\n0');
+		jest.advanceTimersByTime(35000);
+		expect(game.session.themeIndex).toBe(-1);
+		jest.advanceTimersByTime(1000);
+		expect(game.session.themeIndex).toBe(0);
+	});
+
+	it('freezes the press timer and answer timer for their remaining durations', () => {
+		start([question(), question()]);
+		game.setTimeSettings({ timeOfRound: 600, timeForThinkingOnQuestion: 10, timeForPrintingAnswer: 8 });
+		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
+		jest.advanceTimersByTime(2500);
+		jest.advanceTimersByTime(2000);
+		game.handleClientMessage('Host', 'PAUSE\n+');
+		const pressPause = messages.Alice.filter(text => text.startsWith('PAUSE\n+')).pop()!.split('\n');
+		expect(Number(pressPause[3])).toBe(20);
+		jest.advanceTimersByTime(30000);
+		game.handleClientMessage('Host', 'PAUSE\n-');
+		jest.advanceTimersByTime(7000);
+		game.handleClientMessage('Alice', 'I\n0');
+		expect(messages.Alice).toContain('TIMER\n2\nGO\n80\n0');
+		jest.advanceTimersByTime(3000);
+		game.handleClientMessage('Host', 'PAUSE\n+');
+		const answerPause = messages.Alice.filter(text => text.startsWith('PAUSE\n+')).pop()!.split('\n');
+		expect(Number(answerPause[4])).toBe(30);
+		jest.advanceTimersByTime(30000);
+		expect(game.session.answererIndex).toBe(0);
+		game.handleClientMessage('Host', 'PAUSE\n-');
+		jest.advanceTimersByTime(4999);
+		expect(game.session.answererIndex).toBe(0);
+		jest.advanceTimersByTime(1);
+		expect(game.session.answererIndex).toBe(-1);
+		expect(game.session.players[0].sum).toBe(-100);
+	});
+
+	it('expires the press timer once and reveals the answer', () => {
+		start([question(), question()]);
+		game.setTimeSettings({ timeOfRound: 600, timeForChoosingQuestion: 40, timeForThinkingOnQuestion: 5 });
+		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
+		jest.advanceTimersByTime(2500);
+		expect(messages.Alice).toContain('TRY');
+		jest.advanceTimersByTime(5000);
+		expect(messages.Alice.filter(text => text === 'TRY')).toHaveLength(1);
+		expect(messages.Alice).toContain('RIGHTANSWER\ntext\nyes');
+	});
+
+	it('does not let the old press deadline restart or finish a later press phase', () => {
+		start([question(), question()]);
+		game.setTimeSettings({ timeOfRound: 600, timeForThinkingOnQuestion: 10, timeForPrintingAnswer: 20 });
+		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
+		jest.advanceTimersByTime(2500);
+		jest.advanceTimersByTime(5000);
+		game.handleClientMessage('Alice', 'I\n0');
+		game.handleClientMessage('Alice', 'ANSWER\nwrong');
+		jest.advanceTimersByTime(1000);
+		expect(messages.Alice.filter(text => text === 'TRY')).toHaveLength(2);
+		jest.advanceTimersByTime(4000);
+		expect(game.session.isQuestionPlaying).toBe(true);
+		expect(messages.Alice.filter(text => text === 'TRY')).toHaveLength(2);
+		game.handleClientMessage('Bob', 'I\n0');
+		game.handleClientMessage('Bob', 'ANSWER\nyes');
+		expect(game.session.players[1].sum).toBe(100);
+	});
+
+	it('ends immediately when one player passed and the other answered incorrectly', () => {
+		start([question(), question()]);
+		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
+		jest.advanceTimersByTime(2500);
+		game.handleClientMessage('Bob', 'PASS');
+		game.handleClientMessage('Alice', 'I\n0');
+		game.handleClientMessage('Alice', 'ANSWER\nwrong');
+		expect(messages.Alice).toContain('RIGHTANSWER\ntext\nyes');
+		expect(game.session.isQuestionPlaying).toBe(false);
+	});
+
+	it('lets the showman pick and cancels the player prompt without changing chooser', () => {
+		start([question(), question()]);
+		expect(messages.Host).toContain('CHOOSE\n1');
+		game.handleClientMessage('Bob', 'CHOICE\n0\n0');
+		expect(game.session.themeIndex).toBe(-1);
+		game.handleClientMessage('Host', 'CHOICE\n0\n1');
+		expect(game.session.questionIndex).toBe(1);
+		expect(game.session.chooserIndex).toBe(0);
+		expect(messages.Alice).toContain('CANCEL');
+		jest.advanceTimersByTime(45000);
+		expect(game.session.themes[0].prices.filter(price => price === -1)).toHaveLength(1);
+	});
+
+	it('advances the current step, not the round, without replaying old timeouts', () => {
+		start([question(), question()]);
+		game.handleClientMessage('Bob', 'MOVE\n1');
+		expect(game.session.themeIndex).toBe(-1);
+		game.handleClientMessage('Host', 'PAUSE\n+');
+		game.handleClientMessage('Host', 'MOVE\n1');
+		expect(game.session.themeIndex).toBe(-1);
+		game.handleClientMessage('Host', 'PAUSE\n-');
+		game.handleClientMessage('Host', 'MOVE\n1');
+		expect(game.session.roundIndex).toBe(0);
+		expect(game.session.themeIndex).toBe(0);
+		game.handleClientMessage('Host', 'MOVE\n1');
+		expect(game.session.isQuestionPlaying).toBe(true);
+		game.handleClientMessage('Host', 'MOVE\n1');
+		game.handleClientMessage('Host', 'MOVE\n1');
+		expect(messages.Alice).toContain('TRY');
+		game.handleClientMessage('Host', 'MOVE\n1');
+		expect(messages.Alice).toContain('RIGHTANSWER\ntext\nyes');
+		expect(game.session.roundIndex).toBe(0);
+		jest.advanceTimersByTime(1000);
+		expect(messages.Alice.filter(text => text === 'TRY')).toHaveLength(1);
+	});
+
 	it('never prompts the previous answerer on subsequent questions without a new press', () => {
 		start([question(), question()]);
 		answerFirst();
@@ -124,7 +260,7 @@ describe('Reported game regressions', () => {
 		game.handleClientMessage('Bob', `ATOM\nvideo\n${uri}`);
 		expect(messages.Alice).not.toContain('QUESTION_END');
 		game.handleClientMessage('Host', 'PAUSE\n-');
-		game.handleClientMessage('Bob', `ATOM\nvideo\n${uri}`);
+		expect(messages.Alice).toContain('QUESTION_END');
 		game.handleClientMessage('Bob', `ATOM\nvideo\n${uri}`);
 		expect(messages.Alice.filter(text => text === 'QUESTION_END')).toHaveLength(1);
 	});

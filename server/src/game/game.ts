@@ -71,7 +71,7 @@ export class Game {
 	/** Content atoms of the current question. */
 	private atoms: ContentAtom[] = [];
 
-	private waitingAnswerMedia: { atom: ContentAtom; step: PendingStep; advance: () => void } | null = null;
+	private waitingAnswerMedia: { atom: ContentAtom; step: PendingStep; advance: () => void; completedWhilePaused?: boolean } | null = null;
 
 	/** Index of the next atom to show. */
 	private atomIndex = 0;
@@ -87,6 +87,8 @@ export class Game {
 
 	/** Players who can press the button in the current question. */
 	private pendingPressers: number[] = [];
+
+	private pressTurn = 0;
 
 	/** True only while oral answers are being solicited. */
 	private oralAnswerPhase = false;
@@ -109,6 +111,11 @@ export class Game {
 
 	/** True when the game timers are paused. */
 	private isPaused = false;
+
+	/** Foreground transition, distinct from the round deadline and bot background actions. */
+	private mainStep: PendingStep | null = null;
+
+	private readonly visibleTimers: ({ maximum: number; startedAt: number; elapsed: number; running: boolean } | null)[] = [null, null, null];
 
 	/** Steps scheduled by the game logic. */
 	private pendingSteps: PendingStep[] = [];
@@ -398,6 +405,11 @@ export class Game {
 			return;
 		}
 
+		if (session.phase === GamePhase.Round && this.choosingQuestion &&
+			(personName === session.players[session.chooserIndex]?.name || personName === session.showman.name)) {
+			this.sendTo(personName, buildMessage(GameMessage.Choose, 1));
+		}
+
 		if (!session.isQuestionPlaying) {
 			return;
 		}
@@ -432,6 +444,19 @@ export class Game {
 
 	/** Sends a message to all connected persons and remembers it for late joiners. */
 	sendAll(text: string): void {
+		const parts = text.split('\n');
+		if (parts[0] === GameMessage.Timer) {
+			const index = Number(parts[1]);
+			if (index >= 0 && index < this.visibleTimers.length) {
+				if (parts[2] === 'GO') {
+					this.visibleTimers[index] = { maximum: Number(parts[3]), startedAt: Date.now(), elapsed: 0, running: true };
+				} else if (parts[2] === 'STOP') {
+					this.visibleTimers[index] = null;
+				}
+			}
+		} else if (parts[0] === GameMessage.Stop) {
+			this.visibleTimers.fill(null);
+		}
 		for (const [name, connection] of this.connections) {
 			connection.send('Receive', {
 				IsSystem: true,
@@ -487,7 +512,24 @@ export class Game {
 		};
 
 		this.pendingSteps.push(step);
-		this.armStep(step);
+		if (!this.isPaused) this.armStep(step);
+		return step;
+	}
+
+	private cancelMainStep(): void {
+		if (!this.mainStep) return;
+		if (this.mainStep.timeout) clearTimeout(this.mainStep.timeout);
+		this.pendingSteps = this.pendingSteps.filter(step => step !== this.mainStep);
+		this.mainStep = null;
+	}
+
+	private scheduleMain(seconds: number, action: () => void): PendingStep {
+		this.cancelMainStep();
+		const step = this.schedule(seconds, () => {
+			if (this.mainStep === step) this.mainStep = null;
+			action();
+		});
+		this.mainStep = step;
 		return step;
 	}
 
@@ -531,6 +573,7 @@ export class Game {
 	/** Cancels all pending steps. */
 	private cancelPending(preserveRound = false): void {
 		this.waitingAnswerMedia = null;
+		this.mainStep = null;
 		for (const step of this.pendingSteps) {
 			if (step.timeout && (!preserveRound || step !== this.roundStep)) {
 				clearTimeout(step.timeout);
@@ -1047,7 +1090,7 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.Stage, GameStage.Begin));
 		this.notifyChanged();
 
-		this.schedule(2, () => this.startRound(0));
+		this.scheduleMain(2, () => this.startRound(0));
 	}
 
 	/** Starts a round by index. */
@@ -1104,7 +1147,7 @@ export class Game {
 			}
 		});
 
-		this.schedule(1, () => this.askToSelectQuestion());
+		this.scheduleMain(1, () => this.askToSelectQuestion());
 	}
 
 	private getRoundDuration(roundIndex: number): number {
@@ -1189,12 +1232,16 @@ export class Game {
 			return;
 		}
 
+		if (session.showman.isHuman && session.showman.isConnected && session.showman.name !== chooser.name) {
+			this.sendTo(session.showman.name, buildMessage(GameMessage.Choose, 1));
+		}
+
 		if (chooser.isBot || !chooser.isConnected) {
 			this.sendAll(buildMessage(GameMessage.SetChooser, session.chooserIndex, '+', 'ANNOUNCE'));
 			// Give a live showman time to assign the opening move before a bot chooses it.
 			const botDelay = this.firstChoicePending && session.showman.isHuman && session.showman.isConnected
 				? Math.min(10, this.getTimeSettings().timeForChoosingQuestion) : 1.5;
-			this.schedule(botDelay, () => {
+			this.scheduleMain(botDelay, () => {
 				if (this.choiceTurn === turn && session.phase === GamePhase.Round && !session.isQuestionPlaying && !this.closingQuestion) {
 					this.makeBotChoice();
 				}
@@ -1208,7 +1255,7 @@ export class Game {
 
 		// Fallback: bot-like selection if the chooser is idle
 		const expectedRound = session.roundIndex;
-		this.schedule(this.getTimeSettings().timeForChoosingQuestion, () => {
+		this.scheduleMain(this.getTimeSettings().timeForChoosingQuestion, () => {
 			if (this.choiceTurn === turn && this.session.phase === GamePhase.Round
 				&& this.session.roundIndex === expectedRound && !session.isQuestionPlaying && !this.closingQuestion) {
 				this.makeBotChoice();
@@ -1291,12 +1338,13 @@ export class Game {
 
 		const chooser = session.players[session.chooserIndex];
 
-		if (chooser && sender && chooser.name !== sender) {
-			// Only the chooser may select a question
-			if (session.getPlayerIndex(sender) !== session.chooserIndex) {
-				return;
-			}
+		if (!this.choosingQuestion || (chooser?.name !== sender &&
+			!(session.showman.isHuman && session.showman.isConnected && session.showman.name === sender))) {
+			return;
 		}
+		this.cancelMainStep();
+		if (chooser) this.sendTo(chooser.name, buildMessage(GameMessage.Cancel));
+		if (session.showman.name !== chooser?.name) this.sendTo(session.showman.name, buildMessage(GameMessage.Cancel));
 
 		const price = prices[questionIndex];
 		this.choiceTurn += 1;
@@ -1313,7 +1361,7 @@ export class Game {
 		this.sendAll(GameMessage.Choice + '\n' + themeIndex + '\n' + questionIndex + '\n' + price);
 		this.sendTable();
 
-		this.schedule(1, () => this.startQuestion());
+		this.scheduleMain(1, () => this.startQuestion());
 	}
 
 	/** Starts the current question. */
@@ -1364,7 +1412,7 @@ export class Game {
 
 		this.sendAll(buildMessage(GameMessage.PlayerState, 'None'));
 
-		this.schedule(0.5, () => this.showNextAtom());
+		this.scheduleMain(0.5, () => this.showNextAtom());
 	}
 
 	private sendLayout(): void {
@@ -1401,7 +1449,7 @@ export class Game {
 			this.sendAll([GameMessage.Content2, 'background', 0, '', atom.type, '', atom.value].join('\n'));
 
 			if (atom.waitForFinish) {
-				this.schedule(atom.duration / 10, () => this.showNextAtom());
+				this.scheduleMain(atom.duration / 10, () => this.showNextAtom());
 			} else {
 				this.showNextAtom();
 			}
@@ -1411,7 +1459,7 @@ export class Game {
 
 		if (atom.placement === 'replic') {
 			this.sendAll(buildMessage(GameMessage.Replic, 's', escapeNewLines(atom.value)));
-			this.schedule(Math.max(atom.duration / 10, 0.2), () => this.showNextAtom());
+			this.scheduleMain(Math.max(atom.duration / 10, 0.2), () => this.showNextAtom());
 			return;
 		}
 
@@ -1422,7 +1470,7 @@ export class Game {
 			return;
 		}
 
-		this.schedule(Math.max(atom.duration / 10, 0.2), () => this.showNextAtom());
+		this.scheduleMain(Math.max(atom.duration / 10, 0.2), () => this.showNextAtom());
 	}
 
 	/** Called when the last content atom is shown. */
@@ -1447,13 +1495,18 @@ export class Game {
 
 	/** Shows answer options one by one. */
 	private showAnswerOptions(): void {
-		this.answerOptions.forEach((option, index) => {
-			this.schedule(0.4 * index, () => {
-				this.sendAll([GameMessage.Content2, 'screen', index + 1, option.label, option.type, '', option.value].join('\n'));
-			});
-		});
-
-		this.schedule(0.4 * this.answerOptions.length + 0.3, () => this.beginPressPhase());
+		let index = 0;
+		const showNext = () => {
+			if (index >= this.answerOptions.length) {
+				this.scheduleMain(0.3, () => this.beginPressPhase());
+				return;
+			}
+			const option = this.answerOptions[index];
+			this.sendAll([GameMessage.Content2, 'screen', index + 1, option.label, option.type, '', option.value].join('\n'));
+			index += 1;
+			this.scheduleMain(0.4, showNext);
+		};
+		showNext();
 	}
 
 	/** Enables button pressing for the players. */
@@ -1471,6 +1524,7 @@ export class Game {
 		}
 
 		this.pendingPressers = this.collectPressers();
+		this.pressTurn += 1;
 
 		if (this.pendingPressers.length === 0) {
 			this.finishQuestionWithoutAnswer();
@@ -1482,21 +1536,14 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.Try));
 		this.sendAll(buildMessage(GameMessage.Timer, 1, 'GO', pressTime));
 
-		this.schedule(pressTime / 10, () => {
+		this.scheduleMain(pressTime / 10, () => {
 			if (!session.isQuestionPlaying || session.answererIndex >= 0) {
 				return;
 			}
 
 			this.sendAll(buildMessage(GameMessage.EndTry, 'A'));
 
-			// Timer runs out: the players that have already passed do not get another chance,
-			// so when only the passed players are left the question ends right away
-			if (this.areOnlyPassedPlayersLeft()) {
-				this.finishQuestionWithoutAnswer();
-				return;
-			}
-
-			this.beginPressPhase();
+			this.finishQuestionWithoutAnswer();
 		});
 
 		this.scheduleBotPresses();
@@ -1547,7 +1594,7 @@ export class Game {
 
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, -1));
 
-		this.schedule(answerTime, () => {
+		this.scheduleMain(answerTime, () => {
 			if (this.session.isQuestionPlaying && !this.session.isQuestionAnswerShown) {
 				this.finishQuestionWithoutAnswer();
 			}
@@ -1564,8 +1611,9 @@ export class Game {
 			return;
 		}
 
+		const turn = this.pressTurn;
 		this.schedule(1.5 + Math.random() * 3, () => {
-			if (this.session.answererIndex >= 0 || !this.session.isQuestionPlaying) {
+			if (turn !== this.pressTurn || this.session.answererIndex >= 0 || !this.session.isQuestionPlaying) {
 				return;
 			}
 
@@ -1597,6 +1645,7 @@ export class Game {
 
 		const answerer = session.players[index];
 
+		this.pressTurn += 1;
 		session.answererIndex = index;
 		session.answerers = [index];
 		this.pendingPressers = this.pendingPressers.filter(value => value !== index);
@@ -1605,18 +1654,18 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.EndTry, index));
 
 		if (answerer.isHuman && answerer.isConnected) {
-			const answerTime = 20;
+			const answerTime = this.getTimeSettings().timeForPrintingAnswer;
 			this.sendTo(answerer.name, buildMessage(GameMessage.Answer, 'text'));
 			this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, index));
 
-			this.schedule(answerTime, () => {
+			this.scheduleMain(answerTime, () => {
 				if (this.session.answererIndex === index && !this.session.isQuestionAnswerShown) {
 					this.validateAnswer(index, '', false);
 				}
 			});
 		} else {
 			// Bot answer
-			this.schedule(1 + Math.random() * 2, () => this.validateAnswer(index, this.getBotAnswer(index), this.shouldBotAnswerRight()));
+			this.scheduleMain(1 + Math.random() * 2, () => this.validateAnswer(index, this.getBotAnswer(index), this.shouldBotAnswerRight()));
 		}
 	}
 
@@ -1787,6 +1836,7 @@ export class Game {
 			return;
 		}
 
+		this.cancelMainStep();
 		session.players[playerIndex].answer = answer;
 		this.answeredPlayers.add(playerIndex);
 		if (session.answererIndex === playerIndex) session.answererIndex = -1;
@@ -1814,12 +1864,12 @@ export class Game {
 		this.sendSums();
 		session.answererIndex = -1;
 
-		if (this.pendingPressers.length === 0) {
+		if (this.areOnlyPassedPlayersLeft()) {
 			this.finishQuestionWithoutAnswer();
 			return;
 		}
 
-		this.schedule(1, () => this.beginPressPhase());
+		this.scheduleMain(1, () => this.beginPressPhase());
 	}
 
 	private getPenaltyAmount(): number {
@@ -1867,17 +1917,17 @@ export class Game {
 				next();
 			} else if (atom.waitForMediaEnd) {
 				// Playback failures or autoplay restrictions must not hang the game forever.
-				const step = this.schedule(180, () => {
+				const step = this.scheduleMain(180, () => {
 					this.waitingAnswerMedia = null;
 					next();
 				});
 				this.waitingAnswerMedia = { atom, step, advance: next };
 			} else {
-				this.schedule(Math.max(atom.type === 'text' ? 3 : 0.2, atom.duration / 10), next);
+				this.scheduleMain(Math.max(atom.type === 'text' ? 3 : 0.2, atom.duration / 10), next);
 			}
 		};
 		if (atoms.length) next();
-		else this.schedule(3, done);
+		else this.scheduleMain(3, done);
 	}
 
 	private getRightOptionIndex(): number {
@@ -1915,6 +1965,7 @@ export class Game {
 		}
 
 		session.isQuestionPlaying = false;
+		this.pressTurn += 1;
 		this.closingQuestion = true;
 		this.oralAnswerPhase = false;
 		this.pendingPressers = [];
@@ -1939,18 +1990,20 @@ export class Game {
 			}
 
 			if (this.getActiveQuestionsCount() === 0) {
-				this.schedule(1, () => this.endRound('empty'));
+				this.scheduleMain(1, () => this.endRound('empty'));
 				return;
 			}
 
-			this.schedule(1, () => this.askToSelectQuestion());
+			this.scheduleMain(1, () => this.askToSelectQuestion());
 		});
 	}
 
 	/** Restarts the round timer after a question has finished. */
 	private restoreRoundTimer(): void {
 		this.roundTimeLeft = this.getRoundTimeLeft();
-		this.sendAll(buildMessage(GameMessage.Timer, 0, 'GO', this.roundTimeLeft));
+		this.sendAll(this.roundTimeLeft > 0
+			? buildMessage(GameMessage.Timer, 0, 'GO', this.roundTimeLeft)
+			: buildMessage(GameMessage.Timer, 0, 'STOP'));
 	}
 
 	private getRoundTimeLeft(): number {
@@ -1982,18 +2035,18 @@ export class Game {
 		const nextIndex = session.roundIndex + 1;
 
 		if (nextIndex >= session.packageInfo.package.rounds.length) {
-			this.schedule(2, () => this.endGame());
+			this.scheduleMain(2, () => this.endGame());
 			return;
 		}
 
 		const nextRound = session.packageInfo.package.rounds[nextIndex];
 
 		if (nextRound.type === 'final') {
-			this.schedule(2, () => this.startFinalRound(nextIndex));
+			this.scheduleMain(2, () => this.startFinalRound(nextIndex));
 			return;
 		}
 
-		this.schedule(2, () => this.startRound(nextIndex));
+		this.scheduleMain(2, () => this.startRound(nextIndex));
 	}
 
 	/** Starts the final round. */
@@ -2053,7 +2106,7 @@ export class Game {
 			this.endGame();
 			return;
 		}
-		this.schedule(2, () => this.askToDeleteFinalTheme());
+		this.scheduleMain(2, () => this.askToDeleteFinalTheme());
 	}
 
 	/** Gives each eligible player a turn; an idle or absent player is handled by a bounded fallback. */
@@ -2077,7 +2130,7 @@ export class Game {
 		}
 		const seconds = player?.name === deleter.name && player.isBot ? 1.5 : this.getTimeSettings().timeForChoosingFinalTheme;
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', seconds * 10, deleter.index));
-		this.schedule(seconds, () => {
+		this.scheduleMain(seconds, () => {
 			if (this.session.phase === GamePhase.Final && this.finalStage === 'themes' && this.finalDeleteTurn === turn) {
 				const remaining = [...this.finalThemeRemaining];
 				this.deleteFinalTheme(remaining[Math.floor(Math.random() * remaining.length)]);
@@ -2109,7 +2162,7 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 		this.sendAll(buildMessage(GameMessage.Out, index));
 		// Wait for the client deletion animation before enabling another selection.
-		this.schedule(1, () => this.askToDeleteFinalTheme());
+		this.scheduleMain(1, () => this.askToDeleteFinalTheme());
 	}
 
 	/** Plays the final question: every player stakes and answers. */
@@ -2172,7 +2225,7 @@ export class Game {
 		});
 
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', this.getTimeSettings().timeForMakingStake * 10, -2));
-		this.schedule(this.getTimeSettings().timeForMakingStake, () => this.askFinalAnswers());
+		this.scheduleMain(this.getTimeSettings().timeForMakingStake, () => this.askFinalAnswers());
 	}
 
 	private sendFinalStakePrompt(participant: FinalParticipant): void {
@@ -2212,7 +2265,7 @@ export class Game {
 	private collectPressers(): number[] {
 		return this.session.players
 			.map((player, index) => ({ player, index }))
-			.filter(({ player, index }) => this.isActiveSeat(player) && !this.answeredPlayers.has(index))
+			.filter(({ player, index }) => this.isActiveSeat(player) && player.state !== 'Pass' && !this.answeredPlayers.has(index))
 			.map(({ index }) => index);
 	}
 
@@ -2294,13 +2347,13 @@ export class Game {
 
 		if (atom.placement === 'background') {
 			this.sendAll([GameMessage.Content2, 'background', 0, '', atom.type, '', atom.value].join('\n'));
-			this.schedule(Math.max(atom.duration / 10, 0.2), () => this.showFinalContent());
+			this.scheduleMain(Math.max(atom.duration / 10, 0.2), () => this.showFinalContent());
 			return;
 		}
 
 		this.sendAll([GameMessage.Content2, 'screen', 0, '', atom.type, '',
 			atom.type === 'text' ? escapeNewLines(atom.value) : atom.value].join('\n'));
-		this.schedule(Math.max(atom.duration / 10, 0.2), () => this.showFinalContent());
+		this.scheduleMain(Math.max(atom.duration / 10, 0.2), () => this.showFinalContent());
 	}
 
 	private askAllAnswers(): void {
@@ -2329,7 +2382,7 @@ export class Game {
 		});
 
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, -2));
-		this.schedule(answerTime, () => this.finishFinalQuestion());
+		this.scheduleMain(answerTime, () => this.finishFinalQuestion());
 	}
 
 	private finishFinalQuestion(): void {
@@ -2636,14 +2689,22 @@ export class Game {
 
 	/** Handles game move commands. */
 	private handleMove(person: GamePerson, args: string[]): void {
-		if (!this.canManage(person)) {
+		if (!this.canManage(person) || this.isPaused) {
 			return;
 		}
 
 		const direction = parseInt(args[1], 10);
 
 		switch (direction) {
-			case 1:
+			case 1: {
+				if (this.isPaused || !this.mainStep) break;
+				const step = this.mainStep;
+				this.cancelMainStep();
+				if (this.waitingAnswerMedia?.step === step) this.waitingAnswerMedia = null;
+				step.action();
+				break;
+			}
+
 			case 2:
 				this.skipToNextRound();
 				break;
@@ -2719,12 +2780,27 @@ export class Game {
 		if (isPaused) {
 			this.pauseSteps();
 			this.roundTimeLeft = this.getRoundTimeLeft();
-			this.sendAll(buildMessage(GameMessage.Pause, '+', this.roundTimeLeft));
+			const elapsed = this.visibleTimers.map(timer => {
+				if (!timer) return 0;
+				if (timer.running) timer.elapsed = Math.min(timer.maximum, timer.elapsed + (Date.now() - timer.startedAt) / 100);
+				timer.running = false;
+				return Math.floor(timer.elapsed);
+			});
+			this.sendAll(buildMessage(GameMessage.Pause, '+', ...elapsed));
 			return;
 		}
 
+		for (const timer of this.visibleTimers) {
+			if (timer) { timer.startedAt = Date.now(); timer.running = true; }
+		}
 		this.resumeSteps();
-		this.sendAll(buildMessage(GameMessage.Pause, '-', this.roundTimeLeft));
+		this.sendAll(buildMessage(GameMessage.Pause, '-', 0, 0, 0));
+		const waiting = this.waitingAnswerMedia;
+		if (waiting?.completedWhilePaused) {
+			this.waitingAnswerMedia = null;
+			this.cancelMainStep();
+			waiting.advance();
+		}
 	}
 
 	/** Score value used instead of `''` when an option is broadcast. */
@@ -2918,11 +2994,18 @@ export class Game {
 	/** Called when a client reports that a media atom has finished playing. */
 	private handleAtomCompleted(sender: string, type: string, value: string): void {
 		const waiting = this.waitingAnswerMedia;
-		if (this.isPaused || !waiting || type !== waiting.atom.type
+		if (!waiting || type !== waiting.atom.type
 			|| value !== this.resolveClientMediaUrls(sender, waiting.atom.value)) return;
+		if (this.isPaused) {
+			waiting.completedWhilePaused = true;
+			return;
+		}
 		this.waitingAnswerMedia = null;
-		if (waiting.step.timeout) clearTimeout(waiting.step.timeout);
-		this.pendingSteps = this.pendingSteps.filter(step => step !== waiting.step);
+		if (this.mainStep === waiting.step) this.cancelMainStep();
+		else {
+			if (waiting.step.timeout) clearTimeout(waiting.step.timeout);
+			this.pendingSteps = this.pendingSteps.filter(step => step !== waiting.step);
+		}
 		waiting.advance();
 	}
 
@@ -2944,6 +3027,22 @@ export class Game {
 
 	/** Server-level time settings (from the server configuration). */
 	private serverTimeSettings: Partial<Record<string, number>> | undefined;
+
+	/** Applies the client rules supplied when the room is created. */
+	setInitialOptions(settings: Record<string, unknown> | undefined): void {
+		if (!settings) return;
+		const names: Record<string, string> = {
+			oral: 'Oral', managed: 'Managed', falseStart: 'FalseStart', partialText: 'PartialText',
+			partialImages: 'PartialImages', useApellations: 'UseApellations',
+			displayAnswerOptionsLabels: 'DisplayAnswerOptionsLabels', readingSpeed: 'ReadingSpeed',
+		};
+		for (const [key, name] of Object.entries(names)) {
+			const value = settings[key];
+			if (typeof value === 'boolean' || typeof value === 'number') this.applyOption(name, String(value));
+		}
+		const times = settings.timeSettings as Record<string, unknown> | undefined;
+		if (typeof times?.partialImageTime === 'number') this.applyOption('PartialImageTime', String(times.partialImageTime));
+	}
 
 	/** Overrides default game time settings (game settings sent by the client). */
 	setTimeSettings(settings: Partial<Record<string, number>> | undefined): void {

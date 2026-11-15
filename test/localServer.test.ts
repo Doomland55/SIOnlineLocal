@@ -345,6 +345,7 @@ describe('Game engine', () => {
 	});
 
 	it('plays a question and accepts the right answer', () => {
+		game.askToSelectQuestion();
 		game.handleClientMessage('Игрок', 'CHOICE\n0\n0');
 
 		expect(hasMessage('CHOICE\n0\n0\n100')).toBe(true);
