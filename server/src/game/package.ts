@@ -17,6 +17,9 @@ export interface LoadedPackage {
 	/** Absolute path to the package root inside the media directory. */
 	rootDir: string;
 
+	/** Archive-relative media names mapped to the paths actually stored on disk. */
+	mediaPaths?: ReadonlyMap<string, string>;
+
 	/** Original file name. */
 	fileName: string;
 
@@ -127,7 +130,27 @@ export function resolveMediaPath(pack: LoadedPackage, item: ContentItem): string
 		return segments.length > 0 && segments.every(segment => segment !== '' && segment !== '.' && segment !== '..' && !segment.includes('\0'));
 	});
 
-	// Prefer exact spelling, then try an unambiguous case/URI/Unicode-normalized match.
+	// A logical archive name may have been shortened for the host filesystem.
+	if (pack.mediaPaths) {
+		const normalize = (value: string) => value.split('/').map(part => {
+			try { return decodeURIComponent(part).normalize('NFC').toLocaleLowerCase(); } catch { return part.normalize('NFC').toLocaleLowerCase(); }
+		}).join('\0');
+		for (const candidate of valid) {
+			const actual = pack.mediaPaths.get(candidate);
+			if (actual && findMediaFile(pack.rootDir, actual, false)) {
+				return actual;
+			}
+		}
+		for (const candidate of valid) {
+			const matches = [...pack.mediaPaths.entries()].filter(([name]) => normalize(name) === normalize(candidate));
+			if (matches.length === 1 && findMediaFile(pack.rootDir, matches[0][1], false)) {
+				return matches[0][1];
+			}
+		}
+		return null;
+	}
+
+	// Packages constructed without an archive map still support direct disk lookup.
 	for (const relaxed of [false, true]) {
 		for (const candidate of valid) {
 			const resolved = findMediaFile(pack.rootDir, candidate, relaxed);
@@ -210,48 +233,97 @@ function safeRelativePath(entryName: string): string | null {
 }
 
 /**
- * Extracts all media files of a package into `<mediaDir>/<packageId>/`.
- * Media are stored with their original package relative paths so that
- * `content.xml` references keep working.
+ * Extracts media without relying on Windows long-path support or filesystem filename limits.
+ * The map retains archive names, so question references do not need to be rewritten.
  */
-async function extractMedia(zip: JSZip, packageId: string, mediaDir: string): Promise<string> {
-	const rootDir = path.join(mediaDir, packageId);
+async function extractMedia(zip: JSZip, packageId: string, mediaDir: string): Promise<{
+	rootDir: string;
+	mediaPaths: ReadonlyMap<string, string>;
+}> {
+	const rootDir = path.resolve(mediaDir, packageId);
 	fs.mkdirSync(rootDir, { recursive: true });
-
-	for (const entry of Object.values(zip.files)) {
+	const mediaPaths = new Map<string, string>();
+	const entries = Object.values(zip.files).flatMap(entry => {
 		if (entry.dir || NON_MEDIA_FILES.has(entry.name.toLowerCase())) {
-			continue;
+			return [];
 		}
-
-		const relativeName = safeRelativePath(entry.name);
-		// JSZip sanitizes traversal names; do not accept the sanitized alias of an unsafe entry.
-		const originalName = safeRelativePath(entry.unsafeOriginalName ?? entry.name);
-
-		if (!relativeName || !originalName) {
-			continue;
+		const name = safeRelativePath(entry.name);
+		if (!name || !safeRelativePath(entry.unsafeOriginalName ?? entry.name)) {
+			return [];
 		}
+		const extension = path.extname(name).toLowerCase();
+		const folder = !name.includes('/') ? EXTENSION_FOLDERS[extension] : undefined;
+		return [{ entry, name, logical: folder ? `${folder}/${name}` : name }];
+	});
 
-		let destination = path.join(rootDir, relativeName);
-		const [firstSegment] = relativeName.split('/');
-		const hasCategoryFolder = Object.values(MEDIA_FOLDERS).includes(firstSegment);
+	// Reserve every original name before assigning aliases, including names differing only by case.
+	const reserved = new Set(entries.map(({ logical }) => logical.normalize('NFC').toLocaleLowerCase()));
+	const used = new Set<string>();
+	const key = (value: string) => value.normalize('NFC').toLocaleLowerCase();
+	const archiveNames = new Set(entries.map(({ name }) => name));
+	const archiveRoots = new Set(entries.map(({ logical }) => key(logical.split('/')[0])));
+	let aliasFolder = '_si';
+	let aliasFolderIndex = 0;
+	while (archiveRoots.has(key(aliasFolder))) {
+		aliasFolderIndex += 1;
+		aliasFolder = `_si${aliasFolderIndex}`;
+	}
+	const conflicts = (value: string) => {
+		const candidate = key(value);
+		return used.has(candidate)
+			|| [...used].some(other => candidate.startsWith(`${other}/`) || other.startsWith(`${candidate}/`))
+			|| [...reserved].some(other => other.startsWith(`${candidate}/`));
+	};
+	const fits = (value: string) => {
+		const parts = value.split('/');
+		if (!safeRelativePath(value) || path.join(rootDir, value).length > 235) {
+			return false;
+		}
+		return parts.every(part => part.length > 0 && Buffer.byteLength(part, 'utf8') <= 240 && part.length <= 240
+			&& !/[<>:"\\|?*\x00-\x1f]/.test(part) && !/[. ]$/.test(part)
+			&& !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part));
+	};
 
-		if (!hasCategoryFolder && !relativeName.includes('/')) {
-			// Flat package: guess the folder by the file extension
-			const extension = path.extname(relativeName).toLowerCase();
-			const folder = EXTENSION_FOLDERS[extension];
-
-			if (folder) {
-				destination = path.join(rootDir, folder, relativeName);
+	for (const { entry, name, logical } of entries) {
+		let physical = logical;
+		if (!fits(physical) || conflicts(physical)) {
+			// URL-encoded Cyrillic is often several times longer than the real name.
+			try {
+				const decoded = logical.split('/').map(part => decodeURIComponent(part)).join('/');
+				if (fits(decoded) && !reserved.has(key(decoded)) && !conflicts(decoded)) {
+					physical = decoded;
+				}
+			} catch {
+				// Treat invalid percent sequences as literal filename characters.
+			}
+		}
+		if (!fits(physical) || conflicts(physical)) {
+			const hash = crypto.createHash('sha256').update(logical).digest('hex').slice(0, 24);
+			const extension = path.extname(logical).toLowerCase();
+			const safeExtension = /^\.[a-z0-9]{1,10}$/.test(extension) ? extension : '';
+			let suffix = 0;
+			do {
+				physical = `${aliasFolder}/${hash}${suffix ? `-${suffix}` : ''}${safeExtension}`;
+				suffix += 1;
+			} while (reserved.has(key(physical)) || used.has(key(physical)));
+			if (!fits(physical)) {
+				throw new Error(`Media directory path is too long: ${rootDir}. Use a shorter SI_DATA_DIR.`);
 			}
 		}
 
+		used.add(key(physical));
+		mediaPaths.set(name, physical);
+		if (name !== logical && !archiveNames.has(logical)) {
+			mediaPaths.set(logical, physical);
+		}
+		const destination = path.join(rootDir, physical);
 		// eslint-disable-next-line no-await-in-loop
 		const content = await entry.async('nodebuffer');
 		fs.mkdirSync(path.dirname(destination), { recursive: true });
 		fs.writeFileSync(destination, content);
 	}
 
-	return rootDir;
+	return { rootDir, mediaPaths };
 }
 
 /** Reads a .siq file and prepares its media. */
@@ -272,12 +344,13 @@ export async function loadPackage(
 
 	const xml = await contentFile.async('string');
 	const pack = parseXMLtoPackage(parseXml(xml) as unknown as Document);
-	const rootDir = await extractMedia(zip, packageId, mediaDir);
+	const { rootDir, mediaPaths } = await extractMedia(zip, packageId, mediaDir);
 
 	return {
 		id: packageId,
 		package: pack,
 		rootDir,
+		mediaPaths,
 		fileName,
 		filePath,
 	};
@@ -299,13 +372,14 @@ export async function loadPackageFromBuffer(
 
 	const xml = await contentFile.async('string');
 	const pack = parseXMLtoPackage(parseXml(xml) as unknown as Document);
-	const rootDir = await extractMedia(zip, packageId, mediaDir);
+	const { rootDir, mediaPaths } = await extractMedia(zip, packageId, mediaDir);
 
 	return {
 		loaded: {
 			id: packageId,
 			package: pack,
 			rootDir,
+			mediaPaths,
 			fileName,
 			filePath: path.join(mediaDir, `${packageId}.siq`),
 		},
