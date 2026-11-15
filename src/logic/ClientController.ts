@@ -672,7 +672,9 @@ export default class ClientController implements IClientController {
 				break;
 
 			case 'player':
-				this.appDispatch(playerChanged({ index, name: account.name, isHuman: true, isReady: false }));
+				if (index >= 0 && index < this.getState().room2.persons.players.length) {
+					this.appDispatch(playerChanged({ index, name: account.name, isHuman: true, isReady: false }));
+				}
 				break;
 
 			default:

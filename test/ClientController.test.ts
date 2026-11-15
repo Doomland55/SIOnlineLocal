@@ -483,6 +483,20 @@ describe('ClientController - Round Flow', () => {
 		expect(state.room.stage.currentPrice).toBe(725);
 	});
 
+	it('preserves an existing avatar when a duplicate CONNECTED arrives', () => {
+		state.room2.persons.all.Alice = { name: 'Alice', sex: Sex.Female, isHuman: true, avatar: 'data:image/png;base64,abc', avatarVideo: 'https://example/video' };
+		controller.onConnected({ name: 'Alice', sex: Sex.Female, isHuman: true, avatar: null }, 'player', 0);
+		expect(state.room2.persons.all.Alice.avatar).toBe('data:image/png;base64,abc');
+		expect(state.room2.persons.all.Alice.avatarVideo).toBe('https://example/video');
+	});
+
+	it('clears a previous answer decision when the next question starts', () => {
+		controller.onAskAnswer('text');
+		expect(state.room2.stage.decisionType).toBe(DecisionType.Answer);
+		controller.onQuestion('100');
+		expect(state.room2.stage.decisionType).toBe(DecisionType.None);
+	});
+
 	describe('onTable', () => {
 		it('should display round table', () => {
 			const table: number[][] = [

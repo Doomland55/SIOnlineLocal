@@ -20,6 +20,9 @@ export interface ContentAtom {
 
 	/** Should the atom be excluded from the content preload list (background audio). */
 	isBackground: boolean;
+
+	/** A media item with no fixed duration waits for a client playback completion. */
+	waitForMediaEnd?: boolean;
 }
 
 /** An answer option of a question. */
@@ -178,26 +181,18 @@ export function getAnswerContentAtoms(
 	const items = question.params.answer?.items ?? [];
 
 	return items.map(item => {
-		if (item.type === 'text') {
-			return {
-				placement: 'screen' as const,
-				type: 'text',
-				value: item.value,
-				duration: Math.round(getTextDuration(item.value, readingSpeed) * 10),
-				waitForFinish: true,
-				isBackground: false,
-			};
-		}
-
-		const resolved = resolveMedia(item);
-
+		const duration = parseDuration(item.duration);
+		const resolved = item.type === 'text' ? { type: 'text', value: item.value } : resolveMedia(item);
+		const type = resolved?.type ?? 'text';
+		const isMedia = type === 'video' || type === 'audio';
 		return {
-			placement: 'screen' as const,
-			type: resolved?.type ?? 'text',
+			placement: type === 'audio' ? 'background' as const : 'screen' as const,
+			type,
 			value: resolved?.value ?? item.value,
-			duration: Math.round(parseDuration(item.duration) * 10) || DEFAULT_MEDIA_DURATION * 10,
-			waitForFinish: true,
-			isBackground: false,
+			duration: Math.round((duration || (type === 'text' ? getTextDuration(item.value, readingSpeed) : DEFAULT_MEDIA_DURATION)) * 10),
+			waitForFinish: item.waitForFinish !== false,
+			isBackground: type === 'audio' || item.placement === 'background',
+			waitForMediaEnd: isMedia && duration <= 0,
 		};
 	});
 }

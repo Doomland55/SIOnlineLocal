@@ -71,6 +71,8 @@ export class Game {
 	/** Content atoms of the current question. */
 	private atoms: ContentAtom[] = [];
 
+	private waitingAnswerMedia: { atom: ContentAtom; step: PendingStep; advance: () => void } | null = null;
+
 	/** Index of the next atom to show. */
 	private atomIndex = 0;
 
@@ -118,6 +120,8 @@ export class Game {
 	private choiceTurn = 0;
 
 	private choosingQuestion = false;
+
+	private firstChoicePending = false;
 
 	/** Seat edits that would invalidate an active question are applied after it ends. */
 	private pendingSeatEdits: { person: GamePerson; args: string[]; target: GamePerson }[] = [];
@@ -369,8 +373,8 @@ export class Game {
 
 		this.sendAll(buildMessage(
 			GameMessage.Connected,
-			person.role === PersonRole.Showman ? 'showman' : 'player',
-			person.role === PersonRole.Showman ? '' : this.session.getPlayerIndex(name),
+			person.role === PersonRole.Showman ? 'showman' : person.role === PersonRole.Player ? 'player' : 'viewer',
+			person.role === PersonRole.Player ? this.session.getPlayerIndex(name) : '',
 			name,
 			person.isMale ? 'm' : 'f',
 		));
@@ -410,7 +414,8 @@ export class Game {
 			return;
 		}
 
-		if (index === session.answererIndex) {
+		if (index >= 0 && index === session.answererIndex && !session.isQuestionAnswerShown
+			&& !this.answeredPlayers.has(index) && !this.answersToValidate.has(index)) {
 			this.sendTo(personName, buildMessage(GameMessage.Answer, 'text'));
 		}
 	}
@@ -525,6 +530,7 @@ export class Game {
 
 	/** Cancels all pending steps. */
 	private cancelPending(preserveRound = false): void {
+		this.waitingAnswerMedia = null;
 		for (const step of this.pendingSteps) {
 			if (step.timeout && (!preserveRound || step !== this.roundStep)) {
 				clearTimeout(step.timeout);
@@ -678,11 +684,13 @@ export class Game {
 		this.sendAll(message);
 
 		// Late joiners receive the current avatars with the rest of the state
-		this.avatars.set(person.name, { contentType, uri: value });
+		const avatars = this.avatars.get(person.name) ?? {};
+		avatars[contentType] = value;
+		this.avatars.set(person.name, avatars);
 	}
 
 	/** Avatars of the persons that are in the game (used for the full state sync). */
-	private readonly avatars = new Map<string, { contentType: string; uri: string }>();
+	private readonly avatars = new Map<string, { image?: string; video?: string }>();
 
 	/** Sends the avatars of all persons that are in the game. */
 	private sendAvatars(personName: string): void {
@@ -693,7 +701,8 @@ export class Game {
 				continue;
 			}
 
-			this.sendTo(personName, buildMessage(GameMessage.Avatar, name, avatar.contentType, avatar.uri));
+			if (avatar.image) this.sendTo(personName, buildMessage(GameMessage.Avatar, name, 'image', avatar.image));
+			if (avatar.video) this.sendTo(personName, buildMessage(GameMessage.Avatar, name, 'video', avatar.video));
 		}
 	}
 
@@ -860,7 +869,7 @@ export class Game {
 
 		// Do not allow decisions to advance or mutate a paused game.
 		if (this.isPaused && [
-			'CHOICE', 'I', 'ANSWER', 'ANSWER_VERSION', 'PASS', 'SET_STAKE', 'STAKE', 'VALIDATE', 'ISRIGHT', 'CONFIG', 'DELETE',
+			'CHOICE', 'I', 'ANSWER', 'ANSWER_VERSION', 'PASS', 'SET_STAKE', 'STAKE', 'VALIDATE', 'ISRIGHT', 'CONFIG', 'DELETE', 'SETCHOOSER',
 		].includes(command)) {
 			return;
 		}
@@ -880,6 +889,10 @@ export class Game {
 
 			case 'START':
 				this.handleStart(person);
+				break;
+
+			case 'SETCHOOSER':
+				this.handleSetChooser(person, args[1] ?? '');
 				break;
 
 			case 'CHOICE':
@@ -935,7 +948,7 @@ export class Game {
 				break;
 
 			case 'ATOM':
-				this.handleAtomCompleted();
+				this.handleAtomCompleted(sender, args[1] ?? '', args[2] ?? '');
 				break;
 
 			case 'VALIDATE':
@@ -956,6 +969,10 @@ export class Game {
 			case 'LEADERBOARD':
 			case 'CHANGE':
 			case 'APELLATE':
+				// These commands are not implemented; do not interpret their arguments as an avatar.
+				this.observer.log(`Команда пока не поддерживается: ${command}`);
+				break;
+
 			case 'AVATAR':
 				this.handleAvatar(person, args[1] ?? '', args[2] ?? '');
 				break;
@@ -1047,6 +1064,7 @@ export class Game {
 		session.roundName = round.name;
 		session.phase = GamePhase.Round;
 		session.chooserIndex = -1;
+		this.firstChoicePending = true;
 		session.themeIndex = -1;
 		session.questionIndex = -1;
 		session.isQuestionPlaying = false;
@@ -1172,8 +1190,11 @@ export class Game {
 		}
 
 		if (chooser.isBot || !chooser.isConnected) {
-			this.sendAll(buildMessage(GameMessage.SetChooser, session.chooserIndex, '+', '-', 'ANNOUNCE'));
-			this.schedule(1.5, () => {
+			this.sendAll(buildMessage(GameMessage.SetChooser, session.chooserIndex, '+', 'ANNOUNCE'));
+			// Give a live showman time to assign the opening move before a bot chooses it.
+			const botDelay = this.firstChoicePending && session.showman.isHuman && session.showman.isConnected
+				? Math.min(10, this.getTimeSettings().timeForChoosingQuestion) : 1.5;
+			this.schedule(botDelay, () => {
 				if (this.choiceTurn === turn && session.phase === GamePhase.Round && !session.isQuestionPlaying && !this.closingQuestion) {
 					this.makeBotChoice();
 				}
@@ -1182,7 +1203,7 @@ export class Game {
 		}
 
 		this.sendTo(chooser.name, [GameMessage.Choose, '1'].join('\n'));
-		this.sendAll(buildMessage(GameMessage.SetChooser, session.chooserIndex, '+', '-', 'ANNOUNCE'));
+		this.sendAll(buildMessage(GameMessage.SetChooser, session.chooserIndex, '+', 'ANNOUNCE'));
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', this.getTimeSettings().timeForChoosingQuestion * 10, session.chooserIndex));
 
 		// Fallback: bot-like selection if the chooser is idle
@@ -1193,6 +1214,21 @@ export class Game {
 				this.makeBotChoice();
 			}
 		});
+	}
+
+	/** The manager can hand the turn to an active player before a question starts. */
+	private handleSetChooser(person: GamePerson, value: string): void {
+		if (!this.canManage(person) || this.session.phase !== GamePhase.Round
+			|| this.session.isQuestionPlaying || this.closingQuestion || !/^\d+$/.test(value)) return;
+		const index = Number(value);
+		if (!Number.isSafeInteger(index) || !this.isActiveSeat(this.session.players[index])) return;
+		const oldChooser = this.session.players[this.session.chooserIndex];
+		if (this.choosingQuestion && oldChooser && oldChooser !== this.session.players[index]) {
+			this.sendTo(oldChooser.name, buildMessage(GameMessage.Cancel));
+		}
+		this.session.chooserIndex = index;
+		this.sendAll(buildMessage(GameMessage.SetChooser, index, '-', '+'));
+		if (this.choosingQuestion) this.askToSelectQuestion();
 	}
 
 	private getActiveQuestionsCount(): number {
@@ -1265,6 +1301,7 @@ export class Game {
 		const price = prices[questionIndex];
 		this.choiceTurn += 1;
 		this.choosingQuestion = false;
+		this.firstChoicePending = false;
 		this.closingQuestion = true; // A selected question must play even if the round time expires during the transition.
 		prices[questionIndex] = -1;
 
@@ -1752,6 +1789,7 @@ export class Game {
 
 		session.players[playerIndex].answer = answer;
 		this.answeredPlayers.add(playerIndex);
+		if (session.answererIndex === playerIndex) session.answererIndex = -1;
 		this.pendingPressers = this.pendingPressers.filter(index => index !== playerIndex);
 		this.answersToValidate.delete(playerIndex);
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
@@ -1777,7 +1815,6 @@ export class Game {
 		session.answererIndex = -1;
 
 		if (this.pendingPressers.length === 0) {
-			this.showRightAnswer();
 			this.finishQuestionWithoutAnswer();
 			return;
 		}
@@ -1811,26 +1848,36 @@ export class Game {
 			'text',
 			this.answerOptions.length > 0 ? this.getRightOptionLabel() ?? right : right,
 		));
+	}
 
-		const answerAtoms = getAnswerContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item));
-
-		for (const atom of answerAtoms) {
-			if (atom.type === 'text') {
-				this.sendAll([
-					GameMessage.Content2,
-					atom.placement,
-					0,
-					'',
-					'text',
-					'',
-					escapeNewLines(atom.value),
-				].join('\n'));
-
-				continue;
+	/** Show answer items in order; unknown media duration is driven by playback completion. */
+	private playAnswerContent(done: () => void): void {
+		const question = this.session.currentQuestion;
+		const atoms = question ? getAnswerContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item)) : [];
+		let index = 0;
+		const next = () => {
+			if (index >= atoms.length) {
+				done();
+				return;
 			}
-
-			this.sendAll([GameMessage.Content2, atom.placement, 0, '', atom.type, '', atom.value].join('\n'));
-		}
+			const atom = atoms[index++];
+			this.sendAll([GameMessage.Content2, atom.placement, 0, '', atom.type, '',
+				atom.type === 'text' ? escapeNewLines(atom.value) : atom.value].join('\n'));
+			if (!atom.waitForFinish && index < atoms.length) {
+				next();
+			} else if (atom.waitForMediaEnd) {
+				// Playback failures or autoplay restrictions must not hang the game forever.
+				const step = this.schedule(180, () => {
+					this.waitingAnswerMedia = null;
+					next();
+				});
+				this.waitingAnswerMedia = { atom, step, advance: next };
+			} else {
+				this.schedule(Math.max(atom.type === 'text' ? 3 : 0.2, atom.duration / 10), next);
+			}
+		};
+		if (atoms.length) next();
+		else this.schedule(3, done);
 	}
 
 	private getRightOptionIndex(): number {
@@ -1878,7 +1925,7 @@ export class Game {
 			session.chooserIndex = outcome.answerer;
 		}
 
-		this.schedule(3, () => {
+		this.playAnswerContent(() => {
 			this.sendAll(buildMessage(GameMessage.QuestionEnd));
 			this.sendAll(buildMessage(GameMessage.ShowTable));
 			this.sendSums();
@@ -2326,7 +2373,7 @@ export class Game {
 		});
 
 		this.sendSums();
-		this.schedule(3, () => this.endGame());
+		this.playAnswerContent(() => this.endGame());
 	}
 
 	/** Finishes the game. */
@@ -2441,7 +2488,10 @@ export class Game {
 				if (this.session.phase === GamePhase.Before) {
 					this.sendInfo();
 				} else {
-					this.sendAll(buildMessage(GameMessage.Config, 'CHANGETYPE', 'player', index, '-', botName, this.session.players[index].isMale ? '+' : '-'));
+					this.sendAll(buildMessage(
+						GameMessage.Config, 'CHANGETYPE', 'player', index, '-', botName,
+						this.session.players[index].isMale ? '+' : '-',
+					));
 				}
 				this.sendAll(buildMessage(GameMessage.PlayerCount, this.session.players.length));
 				this.notifyChanged();
@@ -2505,7 +2555,7 @@ export class Game {
 				}
 
 				this.moveSeatOccupantToViewers(target);
-				const isHuman = args[4] === '+';
+				const isHuman = args[4] === '+' || (args[4] === undefined && !target.isHuman);
 				const name = isHuman ? GameSession.EMPTY_NAME : this.getFreeBotName();
 
 				target.name = name;
@@ -2866,9 +2916,14 @@ export class Game {
 	}
 
 	/** Called when a client reports that a media atom has finished playing. */
-	private handleAtomCompleted(): void {
-		// The server drives pacing by durations, so media completion only matters for
-		// atoms that wait for the media end. To avoid double-advancing we ignore it.
+	private handleAtomCompleted(sender: string, type: string, value: string): void {
+		const waiting = this.waitingAnswerMedia;
+		if (this.isPaused || !waiting || type !== waiting.atom.type
+			|| value !== this.resolveClientMediaUrls(sender, waiting.atom.value)) return;
+		this.waitingAnswerMedia = null;
+		if (waiting.step.timeout) clearTimeout(waiting.step.timeout);
+		this.pendingSteps = this.pendingSteps.filter(step => step !== waiting.step);
+		waiting.advance();
 	}
 
 	private getTimeSettings() {

@@ -705,7 +705,12 @@ export const room2Slice = createSlice({
 			state.persons.hostName = action.payload;
 		},
 		personAdded: (state: Room2State, action: PayloadAction<Account>) => {
-			state.persons.all[action.payload.name] = action.payload;
+			const previous = state.persons.all[action.payload.name];
+			state.persons.all[action.payload.name] = {
+				...action.payload,
+				avatar: action.payload.avatar ?? previous?.avatar ?? null,
+				avatarVideo: action.payload.avatarVideo ?? previous?.avatarVideo,
+			};
 		},
 		personRemoved: (state: Room2State, action: PayloadAction<string>) => {
 			delete state.persons.all[action.payload];

@@ -215,6 +215,7 @@ async function main() {
 	const avatarGameId = await createGame('АватарныйВедущий', ['АватарныйИгрок']);
 	const avatarHost = await connect('АватарныйВедущий');
 	const avatarPlayer = await connect('АватарныйИгрок');
+	const lateViewer = await connect('ПозднийЗритель');
 
 	try {
 		await join(avatarHost, avatarGameId, 'Showman');
@@ -225,10 +226,14 @@ async function main() {
 
 		const avatar = await waitFor(avatarHost.messages, text => text.startsWith('AVATAR'), 15000, 'аватара другого участника');
 		assert.strictEqual(avatar, 'AVATAR\nАватарныйИгрок\nimage\ndata:image/png;base64,iVBORw0KGgo=');
-		console.log('  avatar is relayed to the other participants');
+		await join(lateViewer, avatarGameId, 'Viewer');
+		const existingAvatar = await waitFor(lateViewer.messages, text => text.startsWith('AVATAR\nАватарныйИгрок\n'), 15000, 'аватара для нового участника');
+		assert.strictEqual(existingAvatar, avatar);
+		console.log('  avatar is relayed and restored for a late joiner');
 	} finally {
 		await avatarHost.connection.stop();
 		await avatarPlayer.connection.stop();
+		await lateViewer.connection.stop();
 	}
 
 	console.log('Midgame rules test passed.');

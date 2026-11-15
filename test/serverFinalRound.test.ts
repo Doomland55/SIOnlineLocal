@@ -119,6 +119,28 @@ describe('Final round decisions', () => {
 		expect(game.session.players[0].sum).toBe(250);
 	});
 
+	it('waits for answer video playback before finishing the final', () => {
+		game.dispose();
+		const withMedia = JSON.parse(JSON.stringify(pack)) as LoadedPackage;
+		withMedia.package.rounds[0].themes[0].questions[0].params.answer = {
+			items: [{ type: 'video', value: 'https://example/final.mp4', isRef: false, placement: 'screen' }],
+		};
+		game = new Game(2, 'test', withMedia, false, 'Alice', { onGameChanged: () => {}, log: () => {} }, 'http://example');
+		game.setTimeSettings({ timeForMakingStake: 5, timeForFinalThinking: 5 });
+		game.session.players.push({ name: 'Alice', role: PersonRole.Player, isMale: false, isHuman: true,
+			isConnected: true, isBot: false, isReady: true, sum: 200, stake: 0, state: 'None', answer: '' });
+		game.attachConnection('Alice', connections.Alice);
+		game.startFinalRound(0);
+		jest.advanceTimersByTime(2000);
+		game.handleClientMessage('Alice', 'SET_STAKE\nStake\n50');
+		jest.advanceTimersByTime(6000);
+		game.handleClientMessage('Alice', 'ANSWER\nyes');
+		jest.advanceTimersByTime(15000);
+		expect(game.session.phase).toBe(GamePhase.Final);
+		game.handleClientMessage('Alice', 'ATOM\nvideo\nhttps://example/final.mp4');
+		expect(game.session.phase).toBe(GamePhase.Finished);
+	});
+
 	it('does not start a final when no connected player or bot has a positive score', () => {
 		game.session.players.forEach(player => { player.sum = 0; });
 		jest.advanceTimersByTime(2000);
