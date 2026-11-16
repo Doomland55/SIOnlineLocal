@@ -11,7 +11,13 @@ import {
 	resolveInside,
 	sendFile,
 } from '../server/src/api/storage';
-import { isImageFileName, parseMultipartFile, registerRoutes } from '../server/src/api/routes';
+import {
+	isImageFileName,
+	parseMultipartFile,
+	registerErrorHandling,
+	registerRoutes,
+	registerStatic,
+} from '../server/src/api/routes';
 import { LocalServerConfig } from '../server/src/config';
 import { Lobby } from '../server/src/game/lobby';
 
@@ -210,6 +216,10 @@ describe('Content service HTTP surface', () => {
 
 		const app = express();
 		registerRoutes(app, config, 'http://127.0.0.1', lobby, library, storage, noop);
+		// The uri the content service reports (`/packages/...`, `/avatars/...`) is served by the static part
+		registerStatic(app, config, storage, noop);
+		// Same order as in the server entry point: the json error handler must be the very last
+		registerErrorHandling(app, noop);
 
 		({ server, base } = await listen(app));
 
@@ -261,10 +271,80 @@ describe('Content service HTTP surface', () => {
 		expect(response.status).toBe(200);
 		// The stored folder uses the base64url form, which is what the client requests afterwards
 		expect(await response.text()).toBe('/api/v1/content/packages/w0mcJylzCn-AfvuGdqkty2-KP48/game.siq');
+	});
 
-		const download = await fetch(`${base}/api/v1/content/packages/w0mcJylzCn-AfvuGdqkty2-KP48/game.siq`);
+	// The content service answers a package request with the uri of the stored file, not with the file:
+	// `sicontent-client` calls it to check whether a package is already uploaded and puts the body into
+	// `PackageInfo.uri`. Returning the bytes there makes the next game creation send the whole package
+	// inside the JSON run-game request, which the JSON parser rejects.
+	it('answers a stored package with its uri, as the content service does', async () => {
+		const { body, contentType } = multipart('game.siq', 'package-bytes');
+		const upload = await fetch(`${base}/api/v1/content/packages`, {
+			method: 'POST',
+			headers: { 'Content-Type': contentType, 'Content-MD5': 'w0mcJylzCn+AfvuGdqkty2+KP48=' },
+			body,
+		});
+		expect(upload.status).toBe(200);
+
+		const response = await fetch(`${base}/api/v1/content/packages/w0mcJylzCn-AfvuGdqkty2-KP48/game.siq`);
+		expect(response.status).toBe(200);
+		expect(response.headers.get('content-type')).toContain('text/plain');
+
+		const reportedUri = await response.text();
+		expect(reportedUri).toBe('/packages/w0mcJylzCn-AfvuGdqkty2-KP48/game.siq');
+
+		// The reported uri must be the thing the game is created with, so it has to download the package
+		const download = await fetch(`${base}${reportedUri}`);
 		expect(download.status).toBe(200);
 		expect(await download.text()).toBe('package-bytes');
+	});
+
+	it('keeps answering with a short uri when the package is requested again', async () => {
+		const { body, contentType } = multipart('again.siq', 'package-bytes-2');
+		const upload = await fetch(`${base}/api/v1/content/packages`, {
+			method: 'POST',
+			headers: { 'Content-Type': contentType, 'Content-MD5': 'w0mcJylzCn+AfvuGdqkty2+KP48=' },
+			body,
+		});
+		const uploadUri = await upload.text();
+		const hash = /packages\/([^/]+)\//.exec(uploadUri)![1];
+
+		// Several room creations in a row use the same package: every lookup must stay a uri
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			// eslint-disable-next-line no-await-in-loop
+			const response = await fetch(`${base}/api/v1/content/packages/${hash}/again.siq`);
+			// eslint-disable-next-line no-await-in-loop
+			const uri = await response.text();
+
+			expect(response.status).toBe(200);
+			expect(uri.length).toBeLessThan(200);
+			expect(uri).toBe(`/packages/${hash}/again.siq`);
+		}
+
+		// And a run-game request with that uri still creates a game
+		const runGame = await fetch(`${base}/api/v1/games`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				gameSettings: { networkGameName: 'Комната', players: [], showman: { name: 'Ведущий' } },
+				packageInfo: {
+					type: 0,
+					uri: `/packages/${hash}/again.siq`,
+					contentServiceUri: null,
+					secret: null,
+					source: null,
+				},
+				computerAccounts: [],
+			}),
+		});
+
+		// The uploaded bytes are not a package, so the server reports a package problem - but in JSON,
+		// which is what the client parses. What matters here is that the uri resolves to a file.
+		const answer = await runGame.json() as { isSuccess: boolean; errorType: number; };
+
+		expect(runGame.status).toBe(200);
+		expect(answer.isSuccess).toBe(false);
+		expect(answer.errorType).toBe(4); // BadPackage: the uri was found, the content is not a real .siq
 	});
 
 	it('does not read files outside the storage through the package route', async () => {
@@ -303,9 +383,68 @@ describe('Content service HTTP surface', () => {
 		const uri = await upload.text();
 		expect(uri).toMatch(/^\/api\/v1\/content\/avatars\/[A-Za-z0-9_-]+\/avatar\.png$/);
 
-		const image = await fetch(base + uri);
+		// The uploaded uri is the lookup key: the image itself is served from the uri the service reports
+		const lookup = await fetch(base + uri);
+		const reportedUri = await lookup.text();
+
+		const image = await fetch(base + reportedUri);
 		expect(image.status).toBe(200);
 		expect(image.headers.get('x-content-type-options')).toBe('nosniff');
+	});
+
+	// `GameServerClient` always calls `response.json()`, so a parser error must not answer with HTML:
+	// the client would report "Unexpected token '<', \"<!DOCTYPE ...\" is not valid JSON"
+	it('serves the library uri reported by the package list and nothing outside of it', async () => {
+		fs.mkdirSync(path.join(dir, 'packages'), { recursive: true });
+		fs.writeFileSync(path.join(dir, 'packages', 'library.siq'), 'library-bytes');
+
+		// `/api/v1/packages` advertises `/packages/<fileName>`, so this exact uri must download the file
+		const response = await fetch(`${base}/packages/library.siq`);
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe('library-bytes');
+
+		// Only a plain file name inside the packages directory: no traversal, no other files
+		for (const requestPath of ['/packages/..%2Fsecret.txt', '/packages/..%2f..%2fsecret.txt', '/packages/secret.txt']) {
+			// eslint-disable-next-line no-await-in-loop
+			expect((await fetch(`${base}${requestPath}`)).status).toBe(404);
+		}
+	});
+
+	it('answers an oversized JSON request with a JSON error instead of an HTML page', async () => {
+		const response = await fetch(`${base}/api/v1/games`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ packageInfo: { uri: 'x'.repeat(11 * 1024 * 1024) } }),
+		});
+
+		expect(response.status).toBe(413);
+		expect(response.headers.get('content-type')).toContain('application/json');
+
+		const body = await response.json() as { errorCode: string; maxSizeMb: number; };
+
+		expect(body.errorCode).toBe('RequestEntityTooLarge');
+		expect(body.maxSizeMb).toBe(10);
+	});
+
+	it('answers a stored avatar with an image uri', async () => {
+		const { body, contentType } = multipart('face.png', 'png-bytes', 'image/png');
+		const upload = await fetch(`${base}/api/v1/content/avatars`, {
+			method: 'POST',
+			headers: { 'Content-Type': contentType },
+			body,
+		});
+		const hash = /avatars\/([^/]+)\//.exec(await upload.text())![1];
+
+		const response = await fetch(`${base}/api/v1/content/avatars/${hash}/face.png`);
+		expect(response.status).toBe(200);
+
+		const reportedUri = await response.text();
+		expect(reportedUri).toBe(`/avatars/${hash}/face.png`);
+
+		const image = await fetch(`${base}${reportedUri}`);
+		expect(image.status).toBe(200);
+		expect(image.headers.get('content-type')).toContain('image/png');
 	});
 });
 

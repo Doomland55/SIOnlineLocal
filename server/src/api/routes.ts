@@ -4,7 +4,7 @@ import path from 'path';
 import { LocalServerConfig } from '../config';
 import { PackageLibrary } from '../game/library';
 import { Lobby } from '../game/lobby';
-import { isAcceptableHash, LocalContentStorage, sendFile } from './storage';
+import { isAcceptableHash, LocalContentStorage, resolveInside, sendFile } from './storage';
 import { requestBaseUrl } from './requestContext';
 import { isEmptySlotName } from '../game/session';
 import {
@@ -16,6 +16,9 @@ import {
 	RunGameRequestModel,
 	RunGameResponseModel,
 } from './models';
+
+/** Limit of JSON request bodies. Packages are uploaded as multipart/form-data, so this stays small. */
+export const JSON_BODY_LIMIT = '10mb';
 
 /** Maximum size of a package that could be uploaded through the REST API. */
 function getPackageLimit(config: LocalServerConfig): string {
@@ -134,17 +137,21 @@ async function resolvePackage(
 ): Promise<{ filePath: string } | { error: GameCreationResultCode }> {
 	const { uri } = packageInfo;
 
-	// packages/<hash>/<name> is stored by our own content service
-	const apiMatch = /\/api\/v1\/content\/packages\/([^/]+)\/(.+)$/.exec(uri);
+	// A package stored by our own content service. Two forms are accepted:
+	// `/api/v1/content/packages/<hash>/<name>` (this server) and `/packages/<hash>/<name>`
+	// (the uri the content service reports for an already uploaded package, as the reference
+	// service does). Both are resolved by hash, so the file is found without guessing.
+	const storedPackageMatch = /(?:\/api\/v1\/content)?\/packages\/([^/]+)\/(.+)$/.exec(uri);
 
-	if (apiMatch) {
-		const filePath = storage.getPackagePath(apiMatch[1], decodeURIComponent(apiMatch[2]));
+	if (storedPackageMatch) {
+		const filePath = storage.getPackagePath(
+			storedPackageMatch[1],
+			decodeURIComponent(storedPackageMatch[2]),
+		);
 
-		if (!filePath) {
-			return { error: GameCreationResultCode.NoPackage };
+		if (filePath) {
+			return { filePath };
 		}
-
-		return { filePath };
 	}
 
 	// Local library relative uri (`/packages/<name>.siq` or a bare file name)
@@ -195,9 +202,18 @@ export function registerRoutes(
 		'/api/v1/content/avatars',
 	], express.raw({ type: 'multipart/form-data', limit: getPackageLimit(config) }));
 
-	app.use(express.json({ limit: '10mb' }));
+	// JSON bodies stay small: a package always travels as multipart, never inside a JSON request
+	app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
 	// ---------- Content service ----------
+
+	// The content service answers a package request with the *uri* of the stored file, not with the file
+	// itself: `sicontent-client` calls this endpoint to check whether a package is already uploaded and
+	// puts the body into `PackageInfo.uri`. So the body must stay a short uri: returning the package
+	// bytes here makes the next game creation send the whole package inside the JSON run-game request.
+	const storedFileUri = (prefix: string, filePath: string) =>
+		`${prefix}/${encodeURIComponent(path.basename(path.dirname(filePath)))}`
+		+ `/${encodeURIComponent(path.basename(filePath))}`;
 
 	app.get('/api/v1/content/packages/:hash/:name', (request, response) => {
 		const filePath = storage.getPackagePath(request.params.hash, request.params.name);
@@ -207,7 +223,7 @@ export function registerRoutes(
 			return;
 		}
 
-		sendFile(response, filePath);
+		response.type('text/plain').send(storedFileUri('/packages', filePath));
 	});
 
 	app.head('/api/v1/content/packages/:hash/:name', (request, response) => {
@@ -253,7 +269,8 @@ export function registerRoutes(
 			return;
 		}
 
-		sendFile(response, filePath);
+		// Same contract as packages: the uri of the stored avatar, which is a plain image link
+		response.type('text/plain').send(storedFileUri('/avatars', filePath));
 	});
 
 	app.post('/api/v1/content/avatars', async (request, response) => {
@@ -500,8 +517,46 @@ export function registerStatic(
 		sendFile(response, filePath, { inlineActiveContent: true });
 	});
 
-	// Local server has no avatar library: avatars are not displayed
-	app.get(['/defaultAvatars/:name', '/avatars/:name'], (_request, response) => {
+	// Library packages are advertised by `/api/v1/packages` as `/packages/<fileName>`, so that uri must work.
+	// Only files directly inside the packages directory are served: no subdirectories, no traversal.
+	app.get('/packages/:name', (request, response) => {
+		const fileName = path.basename(request.params.name);
+		const filePath = resolveInside(config.packagesDir, fileName);
+
+		if (!filePath || !fileName.toLowerCase().endsWith('.siq')) {
+			response.status(404).end();
+			return;
+		}
+
+		sendFile(response, filePath);
+	});
+
+	// Uploaded packages are reachable by the uri the content service reports for them
+	app.get('/packages/:hash/:name', (request, response) => {
+		const filePath = storage.getPackagePath(request.params.hash, request.params.name);
+
+		if (!filePath) {
+			response.status(404).end();
+			return;
+		}
+
+		sendFile(response, filePath);
+	});
+
+	// Stored avatars are plain images, they are shown inline as image links
+	app.get('/avatars/:hash/:name', (request, response) => {
+		const filePath = storage.getAvatarPath(request.params.hash, request.params.name);
+
+		if (!filePath) {
+			response.status(404).end();
+			return;
+		}
+
+		sendFile(response, filePath);
+	});
+
+	// Local server has no default avatars library
+	app.get('/defaultAvatars/:name', (_request, response) => {
 		response.status(404).end();
 	});
 
@@ -530,6 +585,35 @@ export function registerStatic(
 	});
 
 	void log;
+}
+
+/**
+ * Registers the error handler of the REST API.
+ *
+ * It must be the last middleware, after the routes. A request bigger than the body parser limit
+ * must still answer with a JSON body: `GameServerClient` always calls `response.json()`, so the
+ * default HTML error page turns into "Unexpected token '<', \"<!DOCTYPE ...\" is not valid JSON"
+ * in the client instead of a clear message.
+ */
+export function registerErrorHandling(app: express.Express, log: (message: string) => void): void {
+	app.use((error: { type?: string; status?: number; limit?: number }, _request: Request, response: Response,
+		next: express.NextFunction) => {
+		if (error?.type !== 'entity.too.large') {
+			next(error);
+			return;
+		}
+
+		const limitMb = typeof error.limit === 'number' ? Math.round(error.limit / (1024 * 1024)) : null;
+		log(`[api] отклонён слишком большой запрос: лимит ${limitMb ?? '?'} МБ`);
+
+		response.status(413).json({
+			errorCode: 'RequestEntityTooLarge',
+			message: limitMb === null
+				? 'Запрос слишком большой'
+				: `Запрос больше ${limitMb} МБ: сервер не принимает такие данные в JSON.`,
+			maxSizeMb: limitMb,
+		});
+	});
 }
 
 export default registerRoutes;

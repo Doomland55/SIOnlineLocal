@@ -7,7 +7,7 @@ import { Game } from './game/game';
 import { PackageLibrary } from './game/library';
 import { Lobby } from './game/lobby';
 import { LocalContentStorage } from './api/storage';
-import { registerRoutes, registerStatic } from './api/routes';
+import { registerErrorHandling, registerRoutes, registerStatic } from './api/routes';
 import { SIHostHub } from './hubs/siHostHub';
 import { SIOnlineHub } from './hubs/sionlineHub';
 
@@ -99,6 +99,8 @@ async function main() {
 
 	registerRoutes(app, config, publicBaseUrl, lobby, library, storage, log);
 	registerStatic(app, config, storage, log);
+	// Must be registered after the routes: it turns body parser errors into JSON answers
+	registerErrorHandling(app, log);
 
 	// Uploading packages uses a raw body parser, so it must be registered before the JSON one
 	server.on('upgrade', (request, socket, head) => {
