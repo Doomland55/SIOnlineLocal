@@ -1,9 +1,16 @@
+import crypto from 'crypto';
 import express from 'express';
 import fs from 'fs';
 import http from 'http';
 import os from 'os';
 import path from 'path';
-import { LocalContentStorage, isSafeHashSegment, resolveInside, sendFile } from '../server/src/api/storage';
+import {
+	isAcceptableHash,
+	LocalContentStorage,
+	normalizeHashSegment,
+	resolveInside,
+	sendFile,
+} from '../server/src/api/storage';
 import { isImageFileName, parseMultipartFile, registerRoutes } from '../server/src/api/routes';
 import { LocalServerConfig } from '../server/src/config';
 import { Lobby } from '../server/src/game/lobby';
@@ -45,23 +52,44 @@ describe('Content storage path safety', () => {
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
-	describe('isSafeHashSegment', () => {
-		it('accepts hashes that the content client produces', () => {
-			expect(isSafeHashSegment(LocalContentStorage.hash(Buffer.from('data')))).toBe(true);
-			expect(isSafeHashSegment('abcDEF012_-')).toBe(true);
+	describe('hash normalization', () => {
+		/** Hash exactly as `sicontent-client` puts it into the `Content-MD5` header. */
+		const clientHeaderHash = (value: string) => crypto
+			.createHash('sha1')
+			.update(Buffer.from(value))
+			.digest('base64');
+
+		it('accepts the padded base64 form that the web client sends', () => {
+			// This value has '+', '/' and trailing '=', so it covers the whole alphabet of the header
+			const header = 'w0mcJylzCn+AfvuGdqkty2+KP48=';
+
+			expect(clientHeaderHash('example')).toBe(header);
+			expect(isAcceptableHash(header)).toBe(true);
+			expect(normalizeHashSegment(header)).toBe('w0mcJylzCn-AfvuGdqkty2-KP48');
 		});
 
-		it('rejects traversal, separators, encoding and empty values', () => {
-			expect(isSafeHashSegment('..')).toBe(false);
-			expect(isSafeHashSegment('.')).toBe(false);
-			expect(isSafeHashSegment('../../etc')).toBe(false);
-			expect(isSafeHashSegment('..\\..\\windows')).toBe(false);
-			expect(isSafeHashSegment('%2e%2e%2fetc')).toBe(false);
-			expect(isSafeHashSegment('/etc')).toBe(false);
-			expect(isSafeHashSegment('a/b')).toBe(false);
-			expect(isSafeHashSegment('')).toBe(false);
-			expect(isSafeHashSegment(null)).toBe(false);
-			expect(isSafeHashSegment(undefined)).toBe(false);
+		it('normalizes every accepted form to the same folder name', () => {
+			const expected = 'w0mcJylzCn-AfvuGdqkty2-KP48';
+
+			expect(normalizeHashSegment('w0mcJylzCn+AfvuGdqkty2+KP48=')).toBe(expected);
+			expect(normalizeHashSegment('w0mcJylzCn-AfvuGdqkty2-KP48')).toBe(expected);
+			expect(normalizeHashSegment('w0mcJylzCn+AfvuGdqkty2+KP48')).toBe(expected);
+		});
+
+		it('accepts hashes without padding and decimal hashes', () => {
+			expect(isAcceptableHash('qvTGHdzF6KLavt4PO0gs2a6pQ00')).toBe(true);
+			expect(isAcceptableHash('12345678901234567890')).toBe(true);
+		});
+
+		it('rejects values that are not a hash', () => {
+			for (const value of ['..', '.', '../../etc', '..\\..\\windows', '%2e%2e%2fetc', '/etc', 'a/b', '', 'C:\\temp']) {
+				expect(isAcceptableHash(value)).toBe(false);
+				expect(normalizeHashSegment(value)).toBeNull();
+			}
+
+			expect(isAcceptableHash(null)).toBe(false);
+			expect(isAcceptableHash(undefined)).toBe(false);
+			expect(normalizeHashSegment(undefined)).toBeNull();
 		});
 	});
 
@@ -93,10 +121,14 @@ describe('Content storage path safety', () => {
 			expect(fs.existsSync(path.join(dir, 'package', LocalContentStorage.hash(data), 'game.siq'))).toBe(true);
 		});
 
-		it('stores a valid client hash as a single directory', () => {
-			const uri = storage.savePackage(Buffer.from('x'), 'game.siq', 'clientHash_-1');
-			expect(uri).toBe('/api/v1/content/packages/clientHash_-1/game.siq');
-			expect(fs.existsSync(path.join(dir, 'package', 'clientHash_-1', 'game.siq'))).toBe(true);
+		it('stores a valid client hash as a single directory, normalized like the client url', () => {
+			const uri = storage.savePackage(Buffer.from('x'), 'game.siq', 'w0mcJylzCn+AfvuGdqkty2+KP48=');
+			expect(uri).toBe('/api/v1/content/packages/w0mcJylzCn-AfvuGdqkty2-KP48/game.siq');
+			expect(fs.existsSync(path.join(dir, 'package', 'w0mcJylzCn-AfvuGdqkty2-KP48', 'game.siq'))).toBe(true);
+
+			// The same file is reachable through the hashes the client could ask for
+			expect(storage.getPackagePath('w0mcJylzCn-AfvuGdqkty2-KP48', 'game.siq')).not.toBeNull();
+			expect(storage.getPackagePath('w0mcJylzCn+AfvuGdqkty2+KP48=', 'game.siq')).not.toBeNull();
 		});
 
 		it('rejects traversal in the hash and in the name of a package request', () => {
@@ -217,16 +249,22 @@ describe('Content service HTTP surface', () => {
 		expect(fs.existsSync(path.join(os.tmpdir(), 'si-escaped'))).toBe(false);
 	});
 
-	it('accepts a package upload with a valid Content-MD5', async () => {
+	it('accepts a package upload with the hash format the web client sends', async () => {
 		const { body, contentType } = multipart('game.siq', 'package-bytes');
+		// Real header value: raw base64 with `+`, `/` and `=` (see sicontent-client)
 		const response = await fetch(`${base}/api/v1/content/packages`, {
 			method: 'POST',
-			headers: { 'Content-Type': contentType, 'Content-MD5': 'clientHash_-1' },
+			headers: { 'Content-Type': contentType, 'Content-MD5': 'w0mcJylzCn+AfvuGdqkty2+KP48=' },
 			body,
 		});
 
 		expect(response.status).toBe(200);
-		expect(await response.text()).toBe('/api/v1/content/packages/clientHash_-1/game.siq');
+		// The stored folder uses the base64url form, which is what the client requests afterwards
+		expect(await response.text()).toBe('/api/v1/content/packages/w0mcJylzCn-AfvuGdqkty2-KP48/game.siq');
+
+		const download = await fetch(`${base}/api/v1/content/packages/w0mcJylzCn-AfvuGdqkty2-KP48/game.siq`);
+		expect(download.status).toBe(200);
+		expect(await download.text()).toBe('package-bytes');
 	});
 
 	it('does not read files outside the storage through the package route', async () => {

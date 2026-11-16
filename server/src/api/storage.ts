@@ -4,20 +4,49 @@ import path from 'path';
 import { Response } from 'express';
 
 /**
- * Directory names produced by `LocalContentStorage.hash` (base64url SHA-1).
- * A hash comes from a client header (`Content-MD5`), so it is validated before it is used as a path segment.
+ * A hash in any form the web client can send: standard base64 (`+`, `/`, `=`) in the `Content-MD5`
+ * header and base64url (letters, digits, `-`, `_`) in the urls it requests afterwards.
+ *
+ * Only hash alphabet characters are allowed and the length is bounded, so the normalized value is
+ * always a single directory name: it cannot contain a separator, a dot segment, a drive letter or a
+ * percent-encoded character. `..`, `/etc`, `C:\temp` and `..%2f..` therefore never match.
  */
-const HASH_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const BASE64_HASH_PATTERN = /^[A-Za-z0-9+/\-_]{20,64}={0,2}$/;
+
+/** Decimal hash: another valid form of the same digest, which some clients still send. */
+const DECIMAL_HASH_PATTERN = /^\d{1,40}$/;
 
 /**
- * Returns true when a value could be used as a single directory name inside the data directory.
+ * Converts a client supplied hash (`Content-MD5` header or a path segment) into a single directory name.
  *
- * Hashes arrive as headers from the browser: anything with separators, dot segments, absolute paths
- * or percent-encoded characters must be rejected instead of being normalized, so a request could not
- * silently address a directory outside of the storage root.
+ * `sicontent-client` computes base64 SHA-1 and keeps `+`, `/` and `=` as is in the header, while the
+ * path it requests later uses the base64url form. Both are accepted and normalized to the same
+ * directory name, so an upload and the following download address the same folder.
+ *
+ * Values that are not a hash at all are rejected instead of being normalized.
  */
-export function isSafeHashSegment(value: string | null | undefined): value is string {
-	return typeof value === 'string' && HASH_PATTERN.test(value) && value !== '.' && value !== '..';
+export function normalizeHashSegment(value: string | null | undefined): string | null {
+	if (typeof value !== 'string' || !BASE64_HASH_PATTERN.test(value)) {
+		return null;
+	}
+
+	// The standard base64 alphabet is sanitized exactly like `sicontent-client` does for its urls.
+	return value
+		.replaceAll('+', '-')
+		.replaceAll('/', '_')
+		.replaceAll('=', '');
+}
+
+/**
+ * Returns true when a value looks like a hash of the content service and not like a path.
+ * Used to decide whether a client could be trusted with its own hash instead of a computed one.
+ */
+export function isAcceptableHash(value: string | null | undefined): value is string {
+	if (typeof value !== 'string' || value.length === 0 || value.length > 64) {
+		return false;
+	}
+
+	return normalizeHashSegment(value) !== null || DECIMAL_HASH_PATTERN.test(value);
 }
 
 /**
@@ -71,11 +100,13 @@ export class LocalContentStorage {
 	/**
 	 * Saves a package and returns its relative uri (`/api/v1/content/packages/<hash>/<name>`).
 	 *
-	 * The hash is supplied by the client (`Content-MD5`) and is used as a directory name,
-	 * so it is validated here: an invalid hash is ignored and the content-based one is used instead.
+	 * The hash is supplied by the client (`Content-MD5`) and is used as a directory name.
+	 * It is normalized to the base64url form and checked: a value that is not a hash is ignored
+	 * and the content-based one is used instead, so a broken header never turns into a path.
 	 */
 	savePackage(data: Buffer, name: string, hash?: string | null): string {
-		const packageHash = isSafeHashSegment(hash) ? hash : LocalContentStorage.hash(data);
+		const suppliedHash = isAcceptableHash(hash) ? hash : null;
+		const packageHash = (suppliedHash && normalizeHashSegment(suppliedHash)) ?? LocalContentStorage.hash(data);
 		const safeName = path.basename(name) || 'package.siq';
 		const folder = path.join(this.packagesDir, packageHash);
 
@@ -116,13 +147,16 @@ export class LocalContentStorage {
 		return resolveInside(path.join(this.mediaDir, packageId), relativePath);
 	}
 
-	/** Resolves `<root>/<hash>/<name>` when the hash is a safe segment and the file exists. */
+	/** Resolves `<root>/<hash>/<name>` when the hash is a valid segment and the file exists. */
 	private getSafePath(root: string, hash: string, name: string): string | null {
-		if (!isSafeHashSegment(hash)) {
+		// A decimal hash is a valid form of the digest, but this service never stores such folders
+		const segment = normalizeHashSegment(hash);
+
+		if (!segment) {
 			return null;
 		}
 
-		return resolveInside(path.join(root, hash), path.basename(name));
+		return resolveInside(path.join(root, segment), path.basename(name));
 	}
 }
 

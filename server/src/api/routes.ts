@@ -4,7 +4,7 @@ import path from 'path';
 import { LocalServerConfig } from '../config';
 import { PackageLibrary } from '../game/library';
 import { Lobby } from '../game/lobby';
-import { isSafeHashSegment, LocalContentStorage, sendFile } from './storage';
+import { isAcceptableHash, LocalContentStorage, sendFile } from './storage';
 import { requestBaseUrl } from './requestContext';
 import { isEmptySlotName } from '../game/session';
 import {
@@ -230,7 +230,7 @@ export function registerRoutes(
 
 			const hash = request.headers['content-md5']?.toString();
 
-			if (hash !== undefined && !isSafeHashSegment(hash)) {
+			if (hash !== undefined && !isAcceptableHash(hash)) {
 				log('[content] отклонена загрузка пакета: недопустимый Content-MD5');
 				response.status(400).json({ errorCode: 'BadPackageFile' });
 				return;
