@@ -9,7 +9,7 @@
 
 | Команда | Состояние в локальном сервере |
 |---|---|
-| `INFO`, `READY`, `START`, `CHOICE`, `I`, `ANSWER`, `ANSWER_VERSION`, `PASS` | Обрабатываются; для ответа и выбора проверяются текущая фаза и участник. Устная игра имеет отдельные правила. |
+| `INFO`, `READY`, `START`, `CHOICE`, `I`, `ANSWER`, `ANSWER_VERSION`, `PASS` | Обрабатываются; для ответа и выбора проверяются текущая фаза и участник. В устной игре приглашение получает нажавший игрок, а ответ проверяет ведущий. |
 | `SETCHOOSER` | Управляющий задаёт активного игрока при выборе вопроса; старый запрос выбора отменяется. Не работает во время вопроса, финала и паузы. |
 | `CONFIG` | `ADDTABLE`, `DELETETABLE`, `FREE`, `CHANGETYPE`, `SET`. Изменения состава во время вопроса откладываются до его окончания; финал не поддерживает изменения. `SET` не реализует полноценные перестановки людей. |
 | `DELETE` | Только удаление тем финального раунда. |
@@ -36,7 +36,7 @@
 По статическому использованию `GameMessage` сервер посылает `ANSWER`, `ANSWERS`, `ASK_STAKE`,
 `ASK_VALIDATE`, `AVATAR`, `CANCEL`, `CHOICE`, `CHOOSE`, `CONFIG`, `CONNECTED`, `CONTENT2`,
 `CONTENT_STATE`, `DISCONNECTED`, `ENDTRY`, `FINALTHINK`, `GAMEMETADATA`, `GAME_STATISTICS`,
-`HOSTNAME`, `INFO2`, `LAYOUT`, `MEDIA_PRELOAD_PROGRESS`, `OPTIONS2`, `ORAL_ANSWER`, `OUT`,
+`HOSTNAME`, `INFO2`, `LAYOUT`, `MEDIA_PRELOAD_PROGRESS`, `OPTIONS2`, `OUT`,
 `PACKAGE`, `PASS`, `PAUSE`, `PERSON`, `PERSONFINALSTAKE`, `PERSONSTAKE`, `PIN`, `PLAYER_ANSWER`,
 `PLAYER_COUNT`, `PLAYER_STATE`, `QTYPE`, `QUESTION`, `QUESTIONCAPTION`, `QUESTION_END`, `READY`,
 `REPLIC`, `RIGHTANSWER`, `ROUNDCONTENT`, `ROUNDSNAMES`, `ROUND_END`, `ROUND_THEMES2`,

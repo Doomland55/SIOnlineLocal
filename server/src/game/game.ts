@@ -90,9 +90,6 @@ export class Game {
 
 	private pressTurn = 0;
 
-	/** True only while oral answers are being solicited. */
-	private oralAnswerPhase = false;
-
 	/** Final decisions are kept private until the simultaneous reveal. */
 	private finalParticipants = new Map<number, FinalParticipant>();
 
@@ -1384,7 +1381,6 @@ export class Game {
 		this.answeredPlayers.clear();
 		this.answersToValidate.clear();
 		this.pendingPressers = [];
-		this.oralAnswerPhase = false;
 		this.atomIndex = 0;
 
 
@@ -1513,12 +1509,6 @@ export class Game {
 	private beginPressPhase(): void {
 		const { session } = this;
 
-		// Oral game: players answer without pressing the button, the showman decides who is right
-		if (this.options.oral) {
-			this.beginOralPhase();
-			return;
-		}
-
 		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
 			return;
 		}
@@ -1547,58 +1537,6 @@ export class Game {
 		});
 
 		this.scheduleBotPresses();
-	}
-
-	/**
-	 * Oral game phase: nobody presses the button, every player could answer out loud.
-	 * Every live player gets an answer input, so the answer is checked as soon as somebody gives it.
-	 */
-	private beginOralPhase(): void {
-		const { session } = this;
-
-		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
-			return;
-		}
-
-		this.oralAnswerPhase = true;
-		this.sendAll(buildMessage(GameMessage.OralAnswer));
-
-		// The press phase has not started yet, so everybody who has not answered is still able to answer
-		if (this.pendingPressers.length === 0) {
-			this.pendingPressers = this.collectPressers();
-		}
-
-		const answerers = this.pendingPressers.filter(index => this.isActiveSeat(session.players[index]));
-
-		if (answerers.length === 0) {
-			this.finishQuestionWithoutAnswer();
-			return;
-		}
-
-		// Any of the players could answer: the engine accepts an answer from every one of them
-		for (const index of answerers) {
-			const player = session.players[index];
-
-			if (player.isHuman && player.isConnected) {
-				this.sendTo(player.name, buildMessage(GameMessage.Answer, 'text'));
-			} else if (player.isBot) {
-				this.schedule(1 + Math.random() * 2, () => {
-					if (this.session.isQuestionPlaying && !this.session.isQuestionAnswerShown) {
-						this.validateAnswer(index, this.getBotAnswer(index), this.shouldBotAnswerRight());
-					}
-				});
-			}
-		}
-
-		const answerTime = this.getTimeSettings().timeForThinkingOnQuestion;
-
-		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, -1));
-
-		this.scheduleMain(answerTime, () => {
-			if (this.session.isQuestionPlaying && !this.session.isQuestionAnswerShown) {
-				this.finishQuestionWithoutAnswer();
-			}
-		});
 	}
 
 	/** Makes bots press the button from time to time. */
@@ -1633,7 +1571,7 @@ export class Game {
 	private handlePress(sender: string, _deltaTime: number): void {
 		const { session } = this;
 
-		if (this.isPaused || this.options.oral || !session.isQuestionPlaying || session.isQuestionAnswerShown || session.answererIndex >= 0) {
+		if (this.isPaused || !session.isQuestionPlaying || session.isQuestionAnswerShown || session.answererIndex >= 0) {
 			return;
 		}
 
@@ -1706,8 +1644,7 @@ export class Game {
 			return;
 		}
 
-		if (this.options.oral ? !this.oralAnswerPhase || !this.pendingPressers.includes(index)
-			: this.session.answererIndex !== index) {
+		if (this.session.answererIndex !== index) {
 			return;
 		}
 
@@ -1735,9 +1672,8 @@ export class Game {
 			return;
 		}
 
-		// An answer ends the oral answering phase. Its deadline and bot actions must not
+		// The answering deadline and bot actions must not
 		// finish the question while a human showman is deciding on this answer.
-		this.oralAnswerPhase = false;
 		this.cancelPending(true);
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 		this.answersToValidate.set(playerIndex, Date.now());
@@ -1787,8 +1723,7 @@ export class Game {
 		}
 
 		if (this.isPaused || !this.session.isQuestionPlaying || this.session.isQuestionAnswerShown
-			|| (this.options.oral ? !this.oralAnswerPhase || !this.pendingPressers.includes(index)
-				: this.session.answererIndex !== index)) {
+			|| this.session.answererIndex !== index || this.answersToValidate.has(index)) {
 			return;
 		}
 
@@ -1967,7 +1902,6 @@ export class Game {
 		session.isQuestionPlaying = false;
 		this.pressTurn += 1;
 		this.closingQuestion = true;
-		this.oralAnswerPhase = false;
 		this.pendingPressers = [];
 		this.cancelPending(true);
 		this.restoreRoundTimer();

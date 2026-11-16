@@ -69,6 +69,7 @@ describe('Server decision guards', () => {
 		game.handleClientMessage('Host', 'SET_OPTIONS\nOral\ntrue');
 		game.setTimeSettings({ timeForThinkingOnQuestion: 5, timeOfRound: 10 });
 		startQuestion();
+		game.handleClientMessage('Alice', 'I\n0');
 		game.handleClientMessage('Alice', 'ANSWER\nyes');
 		expect(hostMessages).toContain('ASK_VALIDATE\n0\nyes\n+');
 		expect(received).toContain('TIMER\n2\nSTOP');
@@ -83,6 +84,7 @@ describe('Server decision guards', () => {
 		expect(game.session.players[0].sum).toBe(sign === '+' ? 100 : -100);
 		if (sign === '-') {
 			jest.advanceTimersByTime(1000);
+			game.handleClientMessage('Bob', 'I\n0');
 			game.handleClientMessage('Bob', 'ANSWER\nyes');
 			expect(hostMessages.filter(text => text.startsWith('ASK_VALIDATE'))).toHaveLength(2);
 			game.handleClientMessage('Host', 'VALIDATE\nyes\n+\n1');

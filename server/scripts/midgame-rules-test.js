@@ -5,8 +5,8 @@
  * 1. Правила, изменённые ведущим во время игры (`SET_OPTIONS`), применяются и рассылаются всем:
  *    игрок тоже получает `OPTIONS2`; имя `TimeForBlockingButton` доходит до клиента как известное
  *    ему `ButtonBlocking`.
- * 2. Устная игра (`Oral`), включённая посреди партии, сразу меняет ход вопроса: игроки не нажимают
- *    кнопку, получают `ORAL_ANSWER` и приглашение `ANSWER`, ведущий подтверждает ответ (`VALIDATE`).
+ * 2. Устная игра (`Oral`): приглашение ответа получает только нажавший игрок;
+ *    ведущий подтверждает ответ (`VALIDATE`).
  * 3. Если все игроки нажали «пас», вопрос завершается и показывается правильный ответ.
  * 4. Таблица раунда сохраняет исходную размерность: сыгранные вопросы скрываются (цена -1),
  *    темы не исчезают из `ROUND_THEMES2` / `THEME` / `TABLO2`.
@@ -165,12 +165,13 @@ async function main() {
 		assert.ok(blocking.includes('\nButtonBlocking\n7'), `время блокировки кнопки пришло под неизвестным клиенту именем: ${blocking}`);
 		console.log('  rules changed in the middle of the game reach every client');
 
-		// 2. Oral game: the player answers without pressing the button, the showman confirms the answer
+		// 2. Oral game: only the player who presses gets the answer prompt; the showman confirms it.
 		player.messages.length = 0;
 		await playQuestion(host, player, 0, 0);
-		await waitFor(player.messages, text => text.startsWith('ORAL_ANSWER'), 25000, 'устной фазы вопроса');
-		await waitFor(player.messages, text => text.startsWith('ANSWER'), 25000, 'приглашения к ответу');
-		assert.ok(!player.messages.includes('TRY'), 'в устной игре кнопка нажатия не показывается');
+		await waitFor(player.messages, text => text === 'TRY', 25000, 'фазы нажатия кнопки');
+		assert.ok(!player.messages.some(text => text.startsWith('ANSWER\n')), 'приглашения не должно быть до нажатия');
+		await player.send('I\n0');
+		await waitFor(player.messages, text => text.startsWith('ANSWER\n'), 25000, 'приглашения к ответу после нажатия');
 
 		player.messages.length = 0;
 		host.messages.length = 0;
@@ -188,7 +189,7 @@ async function main() {
 		// The client sends the answer text, not the player index
 		await host.send('VALIDATE\n4\n+\n1');
 		await waitFor(player.messages, text => text.startsWith('PERSON\n+'), 20000, 'присуждения очка после подтверждения');
-		console.log('  oral game: the showman confirms the answer that was given without pressing the button');
+		console.log('  oral game: only the player who pressed answers; the showman confirms');
 
 		await host.send('SET_OPTIONS\nOral\nfalse');
 		await waitFor(host.messages, text => text.startsWith('OPTIONS2') && text.includes('Oral'), 15000, 'выключения устной игры');
