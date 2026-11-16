@@ -138,19 +138,21 @@ const MediaItem: React.FC<MediaItemProps> = ({ src, type, isRef }) => {
 				return <video src={source} controls className='packageView__question__content__item' />;
 
 			case 'html':
+				// `allow-same-origin` is never combined with `allow-scripts`: the package editor is the
+				// application origin, and its session must not be reachable from package content
 				return isRef
 					? <iframe
 						srcDoc={source}
 						title='HTML content'
 						className='packageView__question__content__item'
-						sandbox='allow-scripts allow-same-origin'
+						sandbox='allow-scripts'
 						scrolling='no'
 					/>
 					: <iframe
 						src={source}
 						title='HTML content'
 						className='packageView__question__content__item'
-						sandbox='allow-scripts allow-same-origin'
+						sandbox='allow-scripts'
 						scrolling='no'
 					/>;
 

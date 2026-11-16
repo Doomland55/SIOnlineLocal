@@ -395,6 +395,12 @@ describe('Game rules in the middle of a game', () => {
 		game = lobby.createGame(loaded, 'Игра', 'Ведущий', ['Игрок'], false, 0);
 	});
 
+	// A started game keeps timers of its steps: without them being cancelled
+	// Jest reports open handles and could hang after the run
+	afterEach(() => {
+		game.dispose();
+	});
+
 	beforeEach(() => {
 		messages = [];
 

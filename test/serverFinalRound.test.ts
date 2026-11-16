@@ -24,6 +24,7 @@ describe('Final round decisions', () => {
 		for (const [name, sum] of [['Alice', 200], ['Bob', 300], ['Carol', 0]] as [string, number][]) {
 			game.session.players.push({ name, role: PersonRole.Player, isMale: false, isHuman: true, isConnected: true,
 				isBot: false, isReady: true, sum, stake: 0, state: 'None', answer: 'old' });
+			// eslint-disable-next-line @typescript-eslint/no-loop-func -- the connection is used by its own player only
 			connections[name] = { send: (_target, message: any) => messages.push(message.Text), sendClose: () => {} };
 			game.attachConnection(name, connections[name]);
 		}

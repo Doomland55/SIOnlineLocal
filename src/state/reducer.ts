@@ -16,8 +16,15 @@ import historyReducer from './historySlice';
 
 import siquesterReducer from './siquesterSlice';
 
+/**
+ * Root reducer.
+ *
+ * The default state is applied inside the body instead of the parameter list: redux calls the reducer
+ * with `undefined` state on init, and a default parameter is forbidden by `default-param-last` here.
+ */
 const reducer: Reducer<State> = (
-	state: State = initialState,
+	// eslint-disable-next-line @typescript-eslint/default-param-last -- redux calls reducers with `undefined` state
+	state: State | undefined = initialState,
 	action: UnknownAction
 ): State => ({
 	user: userReducer(state.user, action as UnknownAction),

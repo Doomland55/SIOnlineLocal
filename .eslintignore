@@ -7,3 +7,4 @@ playwright-report
 test-results
 src/mocks
 server/scripts
+tauri/vite.config.ts

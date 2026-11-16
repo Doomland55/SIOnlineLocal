@@ -108,7 +108,7 @@ const tableLocalization = {
 		reviewPackage: 'Paketni baholash',
 		scoreEarned: 'Topilgan ball',
 		scoreLost: 'Yo‘qotilgan ball',
-		tableHint: `Javob berish uchun ekrandagi ramka yongach, tugmani bosing. O‘yin barcha ishtirokchilar tayyor bo‘lgandan so‘ng boshlanadi.`,
+		tableHint: 'Javob berish uchun ekrandagi ramka yongach, tugmani bosing. O‘yin barcha ishtirokchilar tayyor bo‘lgandan so‘ng boshlanadi.',
 		tableLogoAuthor: 'O‘yin muallifi: Vladimir Xil',
 		timeLeft: 'Savol tugashiga qolgan vaqt',
 	},

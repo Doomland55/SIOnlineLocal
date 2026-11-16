@@ -137,6 +137,13 @@ async function main() {
 		log(`Создано игр: ${lobby.getGames().length}. Пин-код игры: /api/v1/games/list`);
 	}
 
+	// The local server has no authentication: anyone who could reach the port could open the lobby,
+	// download uploaded packages and change a game. That is acceptable for a trusted home network only.
+	if (config.host === '0.0.0.0' || config.host === '::') {
+		log('ВНИМАНИЕ: сервер доступен всей локальной сети и не требует входа.');
+		log('Не открывайте этот порт в интернет и используйте только в доверенной сети.');
+	}
+
 	log(`Откройте ${publicBaseUrl} в браузере, чтобы играть.`);
 	log('Игры:');
 	for (const game of lobby.getGames()) {

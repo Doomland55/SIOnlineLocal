@@ -634,6 +634,7 @@ const createNewAutoGame: ActionCreator<ThunkAction<void, State, DataContext, Act
 		try {
 			const result = await dataContext.gameClient.runAutoGameAsync({
 				culture: getFullCulture(state),
+				playerName: state.user.login,
 			});
 
 			saveStateToStorage(state);

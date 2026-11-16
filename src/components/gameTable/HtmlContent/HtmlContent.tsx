@@ -197,7 +197,12 @@ export function HtmlContent(props: HtmlContentProps) {
 		wasAnsweringRef.current = shouldAnswer;
 	}, [postControlMessage, shouldAnswer]);
 
-	// allow-scripts & allow-same-origin combination is safe until we serve parent and iframe content from different origins
+	/**
+	 * The content is a package file served from this origin, so `allow-same-origin` must not be used:
+	 * together with `allow-scripts` it would let the content reach `parent`, the local storage and the
+	 * API of the game. Package content talks to the app through `postMessage` (see `handleMessage`),
+	 * which needs no same-origin access.
+	 */
 	return <iframe
 		ref={frameRef}
 		aria-label='HTML content'
@@ -216,7 +221,7 @@ export function HtmlContent(props: HtmlContentProps) {
 				frameRef.current?.contentWindow?.focus();
 			}
 		}}
-		sandbox='allow-scripts allow-same-origin allow-presentation' />;
+		sandbox='allow-scripts allow-presentation' />;
 }
 
 export default HtmlContent;

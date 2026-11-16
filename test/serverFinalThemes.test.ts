@@ -25,6 +25,7 @@ describe('Final theme deletion', () => {
 		for (const [name, sum] of [['Alice', 100], ['Bob', 200], ['Carol', 0]] as [string, number][]) {
 			game.session.players.push({ name, role: PersonRole.Player, isMale: false, isHuman: true, isConnected: true,
 				isBot: false, isReady: true, sum, stake: 0, state: 'None', answer: '' });
+			// eslint-disable-next-line @typescript-eslint/no-loop-func -- the connection is used by its own player only
 			connections[name] = { send: (_target, msg: any) => messages[name].push(msg.Text), sendClose: () => {} };
 			game.attachConnection(name, connections[name]);
 		}

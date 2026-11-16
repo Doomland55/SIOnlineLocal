@@ -345,7 +345,7 @@ async function run(host: IHost) {
 			console.error(e);
 		}
 
-		let { serverUri } = config;
+		const { serverUri } = config;
 
 		const savedState = loadState();
 		const state = setState(initialState, savedState, config, host.isDesktop());

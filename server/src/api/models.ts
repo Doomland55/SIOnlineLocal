@@ -147,6 +147,9 @@ export interface RunGameRequestModel {
 /** Automatic game run request. */
 export interface RunAutoGameRequestModel {
 	culture: string;
+
+	/** Name of the player who starts the game. */
+	playerName?: string;
 }
 
 /** Game by pin response. */

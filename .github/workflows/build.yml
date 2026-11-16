@@ -15,18 +15,31 @@ jobs:
         node-version: [24.x]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
+        cache: 'npm'
 
     - name: Install
-      run: npm install
+      run: npm ci
+
+    - name: Lint
+      run: npm run lint
+
+    - name: Type check (web client)
+      run: npx tsc --noEmit -p tsconfig.json
+
+    - name: Type check (local server)
+      run: npx tsc --noEmit -p server/tsconfig.json
 
     - name: Test
       run: npm test
+
+    - name: Test (local server scenarios)
+      run: npm run test:server
 
     - name: Build
       run: npm run build-prod

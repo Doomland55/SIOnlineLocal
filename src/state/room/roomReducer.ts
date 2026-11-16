@@ -3,6 +3,7 @@ import RoomState, { initialState } from './RoomState';
 import { KnownRoomAction, RoomActionTypes } from './RoomActions';
 import { removeS } from '../../utils/RecordExtensions';
 
+// eslint-disable-next-line @typescript-eslint/default-param-last -- redux calls reducers with `undefined` state
 const roomReducer: Reducer<RoomState> = (state: RoomState = initialState, anyAction: AnyAction): RoomState => {
 	const action = anyAction as KnownRoomAction;
 

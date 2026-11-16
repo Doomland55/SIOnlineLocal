@@ -279,8 +279,12 @@ async function extractMedia(zip: JSZip, packageId: string, mediaDir: string): Pr
 		if (!safeRelativePath(value) || path.join(rootDir, value).length > 235) {
 			return false;
 		}
+		// Control characters are rejected on purpose: they are not valid in file names of a package
+		// eslint-disable-next-line no-control-regex
+		const hasForbiddenCharacters = (part: string) => /[<>:"\\|?*\x00-\x1f]/.test(part);
+
 		return parts.every(part => part.length > 0 && Buffer.byteLength(part, 'utf8') <= 240 && part.length <= 240
-			&& !/[<>:"\\|?*\x00-\x1f]/.test(part) && !/[. ]$/.test(part)
+			&& !hasForbiddenCharacters(part) && !/[. ]$/.test(part)
 			&& !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part));
 	};
 

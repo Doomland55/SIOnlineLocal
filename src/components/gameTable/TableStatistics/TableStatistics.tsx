@@ -21,7 +21,7 @@ const MedalIcon: React.FC<{ place: number }> = ({ place }) => {
     ribbon: '#64748B',
   };
 
-  const ribbonPath = "M 9 14 L 9 44 L 14 41.5 L 19 44 L 19 14 Z";
+  const ribbonPath = 'M 9 14 L 9 44 L 14 41.5 L 19 44 L 19 14 Z';
 
   return (
     <svg

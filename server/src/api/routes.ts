@@ -4,7 +4,7 @@ import path from 'path';
 import { LocalServerConfig } from '../config';
 import { PackageLibrary } from '../game/library';
 import { Lobby } from '../game/lobby';
-import { LocalContentStorage, sendFile } from './storage';
+import { isSafeHashSegment, LocalContentStorage, sendFile } from './storage';
 import { requestBaseUrl } from './requestContext';
 import { isEmptySlotName } from '../game/session';
 import {
@@ -20,6 +20,14 @@ import {
 /** Maximum size of a package that could be uploaded through the REST API. */
 function getPackageLimit(config: LocalServerConfig): string {
 	return `${config.maxPackageSizeMb}mb`;
+}
+
+/** Extensions of files that could be stored as an avatar of a live person. */
+const AVATAR_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+
+/** Returns true when a file name has an image extension allowed for avatars. */
+export function isImageFileName(fileName: string): boolean {
+	return AVATAR_EXTENSIONS.includes(path.extname(fileName).toLowerCase());
 }
 
 /** Reads a raw request body into a buffer (used for .siq uploads). */
@@ -221,6 +229,13 @@ export function registerRoutes(
 			}
 
 			const hash = request.headers['content-md5']?.toString();
+
+			if (hash !== undefined && !isSafeHashSegment(hash)) {
+				log('[content] отклонена загрузка пакета: недопустимый Content-MD5');
+				response.status(400).json({ errorCode: 'BadPackageFile' });
+				return;
+			}
+
 			const uri = storage.savePackage(file.data, file.name, hash);
 			log(`[content] сохранён пакет ${file.name} (${(file.data.length / 1024).toFixed(0)} КБ)`);
 			response.type('text/plain').send(uri);
@@ -247,6 +262,13 @@ export function registerRoutes(
 			const file = parseMultipartFile(body, request.headers['content-type'] ?? '');
 
 			if (!file) {
+				response.status(400).json({ errorCode: 'BadFile' });
+				return;
+			}
+
+			// Avatars are images: an uploaded HTML or script would be served back from this origin
+			if (!isImageFileName(file.name)) {
+				log(`[content] отклонена загрузка аватара: недопустимый файл ${file.name}`);
 				response.status(400).json({ errorCode: 'BadFile' });
 				return;
 			}
@@ -390,9 +412,12 @@ export function registerRoutes(
 
 	app.post('/api/v1/games/auto', async (request, response) => {
 		const body = request.body as RunAutoGameRequestModel | undefined;
-		void body;
 
-		const playerName = request.query.player?.toString() || 'Игрок';
+		// The web client sends the player name in the body; the query parameter is kept for older clients
+		const playerName = body?.playerName?.trim()
+			|| request.query.player?.toString().trim()
+			|| 'Игрок';
+
 		const result = await lobby.createAutomaticGame(playerName);
 		response.json(result);
 	});
@@ -470,7 +495,9 @@ export function registerStatic(
 			return;
 		}
 
-		sendFile(response, filePath);
+		// A question could show an HTML file of the package, so active media stay inline:
+		// the client renders them in a sandboxed frame without same-origin access
+		sendFile(response, filePath, { inlineActiveContent: true });
 	});
 
 	// Local server has no avatar library: avatars are not displayed
@@ -495,9 +522,7 @@ export function registerStatic(
 		const indexFile = path.join(config.clientDir, 'index.html');
 
 		if (!fs.existsSync(indexFile)) {
-			response.status(404).type('text/plain').send(
-				'Web client is not built. Run `npm run build-local` or `npm run serve-local`.',
-			);
+			response.status(404).type('text/plain').send('Web client is not built. Run `npm run build-local` or `npm run serve-local`.',);
 			return;
 		}
 

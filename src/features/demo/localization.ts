@@ -87,7 +87,7 @@ const demoLocalization = {
 Tezlik va bilim — g‘alaba garovi.
 Savol o‘qib eshittirilgach, ekranda javob berish mumkinligini bildiruvchi ramka paydo bo‘ladi.`,
 		demoCorrectAnswer: 'Siz to‘g‘ri javob berdingiz! Hisobingiz savol qiymati miqdorida oshdi',
-		demoFalseStarts: `Agar o‘yin falstartsiz o‘tkazilsa, ramka (va tugmani bosish imkoniyati) savol bilan birga darhol paydo bo‘ladi.`,
+		demoFalseStarts: 'Agar o‘yin falstartsiz o‘tkazilsa, ramka (va tugmani bosish imkoniyati) savol bilan birga darhol paydo bo‘ladi.',
 		demoFinished: 'Demo tugadi. Rahmat!',
 		demoGameRules: 'Savollarga javob berib ball to‘playsiz. O‘yin oxirida eng ko‘p ball to‘plagan o‘yinchi g‘olib bo‘ladi',
 		demoGiveAnswer: 'Endi savolga javobingizni yozing. Yozing: JAVOB va Yuborish tugmasini yoki Enter ni bosing',

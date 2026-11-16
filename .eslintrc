@@ -24,7 +24,13 @@
 		"@typescript-eslint/indent": "off",
 		"react/jsx-indent": "off",
 		"@typescript-eslint/comma-dangle": "off",		
-		"max-len": ["error", { "code": 150 }],
+		"max-len": ["error", {
+			"code": 150,
+			"ignoreUrls": true,
+			"ignoreStrings": true,
+			"ignoreTemplateLiterals": true,
+			"ignoreRegExpLiterals": true
+		}],
 		"unicode-bom": "off",
 		"import/no-named-as-default": "off",
 		"react/destructuring-assignment": "off",
@@ -64,5 +70,28 @@
 		"no-await-in-loop": "warn",
 		"@typescript-eslint/no-empty-interface": "warn",
 		"@typescript-eslint/no-empty-function": "warn"
-	}
+	},
+	"overrides": [
+		{
+			"files": ["test/**/*.ts", "test/**/*.tsx"],
+			"parserOptions": {
+				"project": "./tsconfig.test.json"
+			},
+			"rules": {
+				// Test data is written in a compact literal style (`{IsOnline: true}`)
+				"@typescript-eslint/object-curly-spacing": "off"
+			}
+		},
+		{
+			"files": ["tauri/src/**/*.ts"],
+			"parserOptions": {
+				"project": "./tauri/tsconfig.json",
+				"tsconfigRootDir": "."
+			},
+			"rules": {
+				// The Tauri project is formatted separately (see tauri/package.json) and mixes both styles
+				"@typescript-eslint/quotes": "off"
+			}
+		}
+	]
 }
