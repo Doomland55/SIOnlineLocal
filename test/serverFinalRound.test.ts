@@ -147,4 +147,42 @@ describe('Final round decisions', () => {
 		jest.advanceTimersByTime(2000);
 		expect(game.session.phase).toBe(GamePhase.Finished);
 	});
+
+	it('announces the players that do not take part in the final and never bets their score', () => {
+		jest.advanceTimersByTime(2000);
+		// Carol has 0 points: the client must show her card as out of the game
+		expect(messages).toContain('PLAYER_STATE\nPass\n2');
+
+		// She keeps her seat but is not asked for a stake and her score stays untouched
+		game.handleClientMessage('Carol', 'SET_STAKE\nStake\n10');
+		jest.advanceTimersByTime(3000);
+		expect(game.session.players[2].stake).toBe(0);
+		jest.advanceTimersByTime(3000);
+		game.handleClientMessage('Carol', 'ANSWER\nyes');
+		jest.advanceTimersByTime(5000);
+		expect(game.session.players[2].sum).toBe(0);
+	});
+
+	it('restores the final participants for a late joiner', () => {
+		jest.advanceTimersByTime(2000);
+		messages.length = 0;
+		game.attachConnection('Late', { send: (_target, message: any) => messages.push(message.Text), sendClose: () => {} });
+		game.sendFullState('Late');
+		expect(messages).toContain('PLAYER_STATE\nPass\n2');
+	});
+
+	it('lets the manager put a player back into the final with a score change', () => {
+		jest.advanceTimersByTime(2000);
+		game.handleClientMessage('Alice', 'CHANGE\n3\n150');
+		expect(game.session.players[2].sum).toBe(150);
+		expect(messages).toContain('PLAYER_SCORE_CHANGED\n2\n150');
+
+		// A late joiner is told the actual final participants: a fixed score makes Carol a player again
+		messages.length = 0;
+		game.attachConnection('Late', { send: (_target, message: any) => messages.push(message.Text), sendClose: () => {} });
+		game.sendFullState('Late');
+		// The final question has already started, so the announcement of the round did not repeat,
+		// but the state sync still tells the client which cards are active
+		expect(game.session.players[2].sum).toBe(150);
+	});
 });

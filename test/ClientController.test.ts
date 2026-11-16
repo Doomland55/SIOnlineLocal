@@ -1804,4 +1804,86 @@ describe('ClientController - Miscellaneous Operations', () => {
 			addGameLogSpy.mockRestore();
 		});
 	});
+
+});
+
+
+describe('ClientController - Final round players', () => {
+	let controller: ClientController;
+	let mockDispatch: Dispatch<AnyAction>;
+	let mockAppDispatch: AppDispatch;
+	let mockGetState: () => State;
+	let mockDataContext: DataContext;
+	let state: State;
+	let dispatchedActions: AnyAction[];
+
+	const createPlayer = (index: number): PlayerInfo => ({
+		name: `Player${index}`,
+		isReady: true,
+		sum: 0,
+		stake: 0,
+		state: PlayerStates.None,
+		canBeSelected: false,
+		replic: null,
+		isDeciding: false,
+		isHuman: true,
+		isChooser: false,
+		inGame: true,
+		mediaLoaded: false,
+		mediaPreloaded: false,
+		mediaPreloadProgress: 0,
+		answer: '',
+		isAppellating: false,
+	});
+
+	beforeEach(() => {
+		state = JSON.parse(JSON.stringify(initialState));
+		state.room2.name = 'TestUser';
+		state.room2.persons.players = [createPlayer(1), createPlayer(2)];
+
+		dispatchedActions = [];
+		const dispatch = (action: AnyAction) => {
+			dispatchedActions.push(action);
+
+			if (action && typeof action.type === 'string') {
+				state = reducer(state, action);
+			}
+
+			return action;
+		};
+
+		mockDispatch = jest.fn(dispatch) as unknown as Dispatch<AnyAction>;
+		mockAppDispatch = jest.fn(dispatch) as unknown as AppDispatch;
+		mockGetState = jest.fn(() => state);
+		mockDataContext = { serverUri: 'http://localhost:5000', contentUris: [] } as unknown as DataContext;
+
+		controller = new ClientController(mockDispatch, mockAppDispatch, mockGetState, mockDataContext);
+	});
+
+	it('dims the cards of the players that are out of the final', () => {
+		controller.onStage('Round', 'Final', 2, 'RemoveOtherThemes');
+		controller.onPlayerState(PlayerStates.Pass, [1]);
+
+		expect(state.room2.persons.players[1].inGame).toBe(false);
+		expect(state.room2.persons.players[1].state).toBe(PlayerStates.Pass);
+		expect(state.room2.persons.players[0].inGame).toBe(true);
+	});
+
+	it('keeps a pass in a normal round as a state, not as leaving the game', () => {
+		controller.onStage('Round', 'Round 2', 1, 'SelectByPlayer');
+		controller.onPlayerState(PlayerStates.Pass, [1]);
+
+		expect(state.room2.persons.players[1].inGame).toBe(true);
+		expect(state.room2.persons.players[1].state).toBe(PlayerStates.Pass);
+	});
+
+	it('brings every player back into the game when the next round starts', () => {
+		controller.onStage('Round', 'Final', 2, 'RemoveOtherThemes');
+		controller.onPlayerState(PlayerStates.Pass, [1]);
+		expect(state.room2.persons.players[1].inGame).toBe(false);
+
+		controller.onStage('Round', 'Round 3', 3, 'SelectByPlayer');
+
+		expect(state.room2.persons.players[1].inGame).toBe(true);
+	});
 });

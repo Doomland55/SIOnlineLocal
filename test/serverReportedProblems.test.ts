@@ -384,4 +384,66 @@ describe('Reported game regressions', () => {
 		expect(messages.Alice).toContain('QUESTION_END');
 		expect(game.session.phase).toBe(GamePhase.Round);
 	});
+	it('changes a player score on CHANGE and broadcasts the new value', () => {
+		start([question()]);
+		messages.Alice.length = 0;
+		messages.Bob.length = 0;
+		game.handleClientMessage('Host', 'CHANGE\n2\n450');
+		expect(game.session.players[1].sum).toBe(450);
+		expect(messages.Alice).toContain('PLAYER_SCORE_CHANGED\n1\n450');
+		expect(messages.Bob).toContain('SUMS\n0\n450');
+		// The same value changes nothing, so nothing is broadcast
+		messages.Alice.length = 0;
+		game.handleClientMessage('Host', 'CHANGE\n2\n450');
+		expect(messages.Alice).toHaveLength(0);
+	});
+
+	it('accepts a score change from the showman only and rejects broken arguments', () => {
+		start([question()]);
+		game.session.players[0].sum = 100;
+		messages.Alice.length = 0;
+		game.handleClientMessage('Alice', 'CHANGE\n1\n999');
+		game.handleClientMessage('Host', 'CHANGE\n0\n999');
+		game.handleClientMessage('Host', 'CHANGE\n3\n999');
+		game.handleClientMessage('Host', 'CHANGE\n1\n1abc');
+		game.handleClientMessage('Host', 'CHANGE\n1\n1e5');
+		game.handleClientMessage('Host', 'CHANGE\n1');
+		expect(game.session.players[0].sum).toBe(100);
+		expect(messages.Alice.some(text => text.startsWith('PLAYER_SCORE_CHANGED'))).toBe(false);
+	});
+
+	it('does not change a score while the game is paused', () => {
+		start([question()]);
+		game.handleClientMessage('Host', 'PAUSE\n+');
+		game.handleClientMessage('Host', 'CHANGE\n1\n777');
+		expect(game.session.players[0].sum).toBe(0);
+	});
+
+	it('keeps an empty seat score untouched', () => {
+		start([question()]);
+		game.session.players.push({ ...player(''), sum: 0 });
+		game.handleClientMessage('Host', 'CHANGE\n3\n500');
+		expect(game.session.players[2].sum).toBe(0);
+	});
+
+	it('serves a stored avatar link that other clients could actually load', () => {
+		start([question()]);
+		messages.Alice.length = 0;
+		messages.Bob.length = 0;
+
+		// The uploading client has reached the server by its own address, so the same avatar
+		// must arrive to every client as a link to the host this client has used
+		game.attachConnection('Alice', { send: (_t, v: any) => messages.Alice.push(v.Text), sendClose: () => {} }, 'http://192.168.1.10:8080');
+		game.handleClientMessage('Alice', 'AVATAR\nimage\nhttp://192.168.1.10:8080/avatars/abcdef/face.png');
+		expect(messages.Alice).toContain('AVATAR\nAlice\nimage\nhttp://192.168.1.10:8080/avatars/abcdef/face.png');
+		expect(messages.Bob).toContain('AVATAR\nAlice\nimage\nhttp://example/avatars/abcdef/face.png');
+	});
+
+	it('keeps an external avatar link as is', () => {
+		start([question()]);
+		messages.Alice.length = 0;
+		messages.Bob.length = 0;
+		game.handleClientMessage('Alice', 'AVATAR\nimage\nhttps://cdn.example.com/avatar.png');
+		expect(messages.Bob).toContain('AVATAR\nAlice\nimage\nhttps://cdn.example.com/avatar.png');
+	});
 });

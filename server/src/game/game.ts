@@ -560,7 +560,13 @@ export class Game {
 	private resolveClientMediaUrls(name: string, text: string): string {
 		const marker = `${SERVER_HOST_PLACEHOLDER}${MEDIA_ROUTE_PREFIX}/${this.packageInfo.id}/`;
 		const base = this.connectionBaseUrls.get(name) ?? this.publicBaseUrl;
-		return text.replaceAll(marker, `${base}${MEDIA_ROUTE_PREFIX}/${this.packageInfo.id}/`);
+		const resolved = text.replaceAll(marker, `${base}${MEDIA_ROUTE_PREFIX}/${this.packageInfo.id}/`);
+
+		// Avatars are stored relative to the server (`<SERVERHOST>/avatars/...`), so every client
+		// receives an address of the host it has used to reach the game (localhost, a LAN ip, a proxy)
+		return resolved.includes(SERVER_HOST_PLACEHOLDER)
+			? resolved.replaceAll(SERVER_HOST_PLACEHOLDER, base)
+			: resolved;
 	}
 
 	/** Sends a message to a single person. */
@@ -811,16 +817,48 @@ export class Game {
 			return;
 		}
 
-		// Avatars are sent as hyperlinks; relative links are resolved by the clients against the game server
-		person.avatar = value;
+		// An avatar could be uploaded through `localhost` or a LAN address of this very server.
+		// Such a link is useless for the other machines, so the host is replaced with the placeholder
+		// that every client gets resolved to the address it has used itself.
+		const normalized = this.normalizeAvatarUri(value);
 
-		const message = buildMessage(GameMessage.Avatar, person.name, contentType, value);
-		this.sendAll(message);
+		person.avatar = normalized;
+
+		this.sendAll(buildMessage(GameMessage.Avatar, person.name, contentType, normalized));
 
 		// Late joiners receive the current avatars with the rest of the state
 		const avatars = this.avatars.get(person.name) ?? {};
-		avatars[contentType] = value;
+		avatars[contentType] = normalized;
 		this.avatars.set(person.name, avatars);
+	}
+
+	/**
+	 * Makes an avatar link portable: a link to this server is stored without the host,
+	 * links to other services (a real content service, `data:` urls) are kept as is.
+	 */
+	private normalizeAvatarUri(value: string): string {
+		if (!/^https?:\/\//i.test(value)) {
+			return value;
+		}
+
+		let url: URL;
+
+		try {
+			url = new URL(value);
+		} catch {
+			return value;
+		}
+
+		const ownOrigins = [this.publicBaseUrl, ...this.connectionBaseUrls.values()]
+			.map(base => {
+				try {
+					return new URL(base).origin;
+				} catch {
+					return '';
+				}
+			});
+
+		return ownOrigins.includes(url.origin) ? `${SERVER_HOST_PLACEHOLDER}${url.pathname}${url.search}` : value;
 	}
 
 	/** Avatars of the persons that are in the game (used for the full state sync). */
@@ -868,6 +906,9 @@ export class Game {
 
 		if (session.phase === GamePhase.Final) {
 			this.sendStage(personName);
+			// After a stage message the client marks every player as in game, so the participants
+			// of the final are restored from their actual scores
+			this.informPlayersOutOfGame(personName);
 			this.sendRoundInfo(personName);
 			this.sendTable(personName);
 		}
@@ -1094,6 +1135,10 @@ export class Game {
 				this.handleFinalThemeDelete(sender, /^\d+$/.test(args[1] ?? '') ? Number(args[1]) : NaN);
 				break;
 
+			case 'CHANGE':
+				this.handleScoreChange(person, args[1] ?? '', args[2] ?? '');
+				break;
+
 			case 'SETHOST':
 			case 'BAN':
 			case 'UNBAN':
@@ -1101,7 +1146,6 @@ export class Game {
 			case 'REPORT':
 			case 'TOGGLE':
 			case 'LEADERBOARD':
-			case 'CHANGE':
 			case 'APELLATE':
 				// These commands are not implemented; do not interpret their arguments as an avatar.
 				this.observer.log(`Команда пока не поддерживается: ${command}`);
@@ -2193,6 +2237,10 @@ export class Game {
 		this.finalStage = 'themes';
 
 		this.sendAll(buildMessage(GameMessage.Stage, GameStage.Round, round.name, roundIndex, 'RemoveOtherThemes'));
+
+		// The client marks every card as in game on a new round, so the players that are out of the
+		// final must be told apart: `Pass` keeps their cards dimmed until the end of the game.
+		this.informPlayersOutOfGame();
 		this.sendRoundInfo();
 		for (let index = 0; index < session.themes.length; index += 1) {
 			if (!this.finalThemeRemaining.has(index)) {
@@ -2206,6 +2254,40 @@ export class Game {
 			return;
 		}
 		this.scheduleMain(2, () => this.askToDeleteFinalTheme());
+	}
+
+	/**
+	 * Tells the clients which players do not take part in the final question.
+	 *
+	 * The client marks every card as in game when a round starts, so a player without a positive score
+	 * would look like a participant. The reference server sends `PLAYER_STATE\nPass\n<indices>`, and the
+	 * client dims exactly those cards (`.out_of_game`).
+	 */
+	private informPlayersOutOfGame(personName?: string): void {
+		const outOfGame: number[] = [];
+
+		for (const [index, player] of this.session.players.entries()) {
+			if (!this.isFinalParticipantSeat(player)) {
+				outOfGame.push(index);
+			}
+		}
+
+		if (outOfGame.length === 0) {
+			return;
+		}
+
+		const text = buildMessage(GameMessage.PlayerState, 'Pass', ...outOfGame);
+
+		if (personName) {
+			this.sendTo(personName, text);
+		} else {
+			this.sendAll(text);
+		}
+	}
+
+	/** True when a seat takes part in the final: it is taken by a live person and has a positive score. */
+	private isFinalParticipantSeat(player: GamePerson | undefined): boolean {
+		return this.isActiveSeat(player) && Number.isSafeInteger(player?.sum) && (player?.sum ?? 0) > 0;
 	}
 
 	/** Gives each eligible player a turn; an idle or absent player is handled by a bounded fallback. */
@@ -2288,7 +2370,7 @@ export class Game {
 			player.answer = '';
 			player.stake = 0;
 			player.state = 'None';
-			if (this.isActiveSeat(player) && Number.isSafeInteger(player.sum) && player.sum > 0) {
+			if (this.isFinalParticipantSeat(player)) {
 				this.finalParticipants.set(index, { name: player.name, sum: player.sum, stake: null, answer: null, draft: '' });
 			}
 		}
@@ -2889,6 +2971,62 @@ export class Game {
 		}
 
 		this.resumeGame();
+	}
+
+	/**
+	 * Changes the score of a player (`CHANGE\n<playerIndex + 1>\n<sum>`).
+	 *
+	 * The client sends a 1-based player number, the server answers the protocol way:
+	 * the new sum is broadcast as `PLAYER_SCORE_CHANGED\n<index>\n<sum>` and `SUMS` keeps the
+	 * scoreboard of every client in sync. Only the manager and the showman could do that.
+	 */
+	private handleScoreChange(person: GamePerson, rawIndex: string, rawSum: string): void {
+		if (!this.canManage(person) || this.isPaused) {
+			return;
+		}
+
+		const playerIndex = Number(rawIndex);
+		const sum = Number(rawSum);
+
+		if (!/^\d+$/.test(rawIndex) || !/^-?\d+$/.test(rawSum) ||
+			!Number.isSafeInteger(playerIndex) || !Number.isSafeInteger(sum)) {
+			return;
+		}
+
+		const index = playerIndex - 1;
+		const player = this.session.players[index];
+
+		if (!player) {
+			return;
+		}
+
+		// An empty seat has no score to change: its sum belongs to nobody
+		if (isEmptySlotName(player.name)) {
+			return;
+		}
+
+		if (player.sum === sum) {
+			return;
+		}
+
+		player.sum = sum;
+
+		// A player that is out of the game after the final round starts keeps the seat but gets no score
+		const participant = this.finalParticipants.get(index);
+
+		if (participant && participant.name === player.name) {
+			participant.sum = sum;
+		}
+
+		const saved = this.leftSeats.get(player.name);
+
+		if (saved?.role === PersonRole.Player && saved.index === index) {
+			saved.sum = sum;
+		}
+
+		this.sendAll(buildMessage(GameMessage.PlayerScoreChanged, index, sum));
+		this.sendSums();
+		this.notifyChanged();
 	}
 
 	/** Score value used instead of `''` when an option is broadcast. */

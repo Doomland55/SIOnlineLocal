@@ -121,7 +121,14 @@ export class LocalContentStorage {
 		return this.getSafePath(this.packagesDir, hash, name);
 	}
 
-	/** Saves an avatar. */
+	/**
+	 * Saves an avatar and returns the url of the image itself.
+	 *
+	 * The reference content service answers an upload with `/avatars/<file>`, an image link that the
+	 * client puts straight into `AVATAR` and into an `<img>` tag. The lookup uri
+	 * (`/api/v1/content/avatars/<hash>/<name>`) answers with the link as text, so returning it here
+	 * would make every other client load a text document instead of a picture.
+	 */
 	saveAvatar(data: Buffer, name: string): string {
 		const avatarHash = LocalContentStorage.hash(data);
 		const safeName = path.basename(name) || 'avatar.png';
@@ -130,7 +137,7 @@ export class LocalContentStorage {
 		fs.mkdirSync(folder, { recursive: true });
 		fs.writeFileSync(path.join(folder, safeName), data);
 
-		return `/api/v1/content/avatars/${avatarHash}/${encodeURIComponent(safeName)}`;
+		return `/avatars/${avatarHash}/${encodeURIComponent(safeName)}`;
 	}
 
 	/** Returns avatar path by hash and file name. */

@@ -381,13 +381,11 @@ describe('Content service HTTP surface', () => {
 
 		expect(upload.status).toBe(200);
 		const uri = await upload.text();
-		expect(uri).toMatch(/^\/api\/v1\/content\/avatars\/[A-Za-z0-9_-]+\/avatar\.png$/);
 
-		// The uploaded uri is the lookup key: the image itself is served from the uri the service reports
-		const lookup = await fetch(base + uri);
-		const reportedUri = await lookup.text();
+		// The answer of an upload is the image link itself, so the clients could render it right away
+		expect(uri).toMatch(/^\/avatars\/[A-Za-z0-9_-]+\/avatar\.png$/);
 
-		const image = await fetch(base + reportedUri);
+		const image = await fetch(base + uri);
 		expect(image.status).toBe(200);
 		expect(image.headers.get('x-content-type-options')).toBe('nosniff');
 	});
@@ -425,6 +423,25 @@ describe('Content service HTTP surface', () => {
 
 		expect(body.errorCode).toBe('RequestEntityTooLarge');
 		expect(body.maxSizeMb).toBe(10);
+	});
+
+	// The upload answer goes straight into `AVATAR` and then into an `<img>` tag of every client,
+	// so it must be the image link itself, not the lookup route that answers with text
+	it('answers an avatar upload with a link to the image', async () => {
+		const { body, contentType } = multipart('face.png', 'png-bytes', 'image/png');
+		const upload = await fetch(`${base}/api/v1/content/avatars`, {
+			method: 'POST',
+			headers: { 'Content-Type': contentType },
+			body,
+		});
+
+		expect(upload.status).toBe(200);
+		const uri = await upload.text();
+		expect(uri).toMatch(/^\/avatars\/[A-Za-z0-9_-]+\/face\.png$/);
+
+		const image = await fetch(`${base}${uri}`);
+		expect(image.status).toBe(200);
+		expect(image.headers.get('content-type')).toContain('image/png');
 	});
 
 	it('answers a stored avatar with an image uri', async () => {

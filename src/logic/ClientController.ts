@@ -299,6 +299,12 @@ export default class ClientController implements IClientController {
 		return result;
 	}
 
+	/**
+	 * Round rules of the current stage (`RemoveOtherThemes` is the final round).
+	 * The client keeps them only here: they tell whether a `Pass` state means "out of the final".
+	 */
+	private currentRoundRules = '';
+
 	private isExternalUri(uri: string): boolean {
 		if (!this.dataContext.contentUris || this.dataContext.contentUris.length === 0) {
 			// If no content URIs defined, check against server URI
@@ -1160,6 +1166,14 @@ export default class ClientController implements IClientController {
 	onPlayerState(state: PlayerStates, playerIndicies: number[]) {
 		this.appDispatch(playerStatesChanged({ indices: playerIndicies, state }));
 
+		// In the final round the server reports the players that do not take part in the question
+		// with a `Pass` state: their cards must stay dimmed, not just get a colored border
+		if (state === PlayerStates.Pass && this.currentRoundRules === RoundRules.RemoveOtherThemes) {
+			playerIndicies.forEach(index => {
+				this.appDispatch(playerInGameChanged({ playerIndex: index, inGame: false }));
+			});
+		}
+
 		if (state === PlayerStates.Lost) {
 			setTimeout(
 				() => {
@@ -1320,6 +1334,8 @@ export default class ClientController implements IClientController {
 
 	onStage(stage: string, stageName: string, stageIndex: number, rules: string) {
 		const state = this.getState();
+
+		this.currentRoundRules = rules;
 
 		this.appDispatch(stopAudio());
 		this.dispatch(roomActionCreators.stageChanged(stage, stageIndex));
