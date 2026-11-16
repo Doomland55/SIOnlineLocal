@@ -174,8 +174,9 @@ async function main() {
 		assert.ok(answers.includes('\n4'), `ведущий должен видеть правильный ответ: ${answers}`);
 		assert.ok(!player.messages.some(text => text.startsWith('QUESTION_ANSWERS\n')), 'ответ не должен утечь игроку');
 		await player.send('I\n0');
+		// The trailing `+` enables the whole set of decisions (×0.5 / ×1 / ×2 and the cancellation)
 		const askValidate = await waitFor(host.messages, text => text.startsWith('ASK_VALIDATE'), 20000, 'проверки устного ответа');
-		assert.strictEqual(askValidate, 'ASK_VALIDATE\n0\n\n-');
+		assert.strictEqual(askValidate, 'ASK_VALIDATE\n0\n\n+');
 		assert.ok(!player.messages.some(text => text.startsWith('ANSWER\n')), 'поле ответа не должно появляться');
 		assert.ok(!player.messages.some(text => text.startsWith('PERSON\n')), 'очки до проверки не начисляются');
 		await host.send('VALIDATE\n\n+\n1');

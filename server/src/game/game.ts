@@ -19,6 +19,9 @@ export interface GameClientConnection {
 /** How many left seats are kept to return players to their places after a page reload. */
 const MAX_SAVED_SEATS = 100;
 
+/** Upper bound of the score multiplier that the showman may apply to an answer. */
+const MAX_ANSWER_FACTOR = 10;
+
 /** Reasons of player selection. */
 const SelectPlayerReason = {
 	Answerer: 'Answerer',
@@ -85,6 +88,15 @@ export class Game {
 	/** Players who can press the button in the current question. */
 	private pendingPressers: number[] = [];
 
+	/**
+	 * Minimum score that a player must have to answer the current question.
+	 * Set by the `price` parameter of a stake question: only the players with a bigger score take part.
+	 */
+	private minimumAnswererSum = 0;
+
+	/** The player who must not answer the current question (`selectionMode=exceptCurrent`). */
+	private excludedAnswererIndex = -1;
+
 	private pressTurn = 0;
 
 	/** Final decisions are kept private until the simultaneous reveal. */
@@ -105,6 +117,9 @@ export class Game {
 
 	/** True when the game timers are paused. */
 	private isPaused = false;
+
+	/** True when the pause was made by the server because the live showman has left the game. */
+	private isPausedByShowmanLeave = false;
 
 	/** Foreground transition, distinct from the round deadline and bot background actions. */
 	private mainStep: PendingStep | null = null;
@@ -226,6 +241,7 @@ export class Game {
 				this.connectionBaseUrls.delete(name);
 
 				const person = this.session.findPerson(name);
+				const isShowman = person?.role === PersonRole.Showman;
 
 				if (person) {
 					// The person leaves the room: the seat becomes free again, so every client
@@ -246,11 +262,77 @@ export class Game {
 
 					this.broadcastPersons();
 				}
+
+				if (isShowman) {
+					this.onShowmanLeft();
+				}
 			}
 		}
 
 		this.updateManagerName();
 		this.notifyChanged();
+	}
+
+	/**
+	 * Pauses the game when the live showman leaves it, so the showman could reconnect and continue.
+	 * The game is resumed automatically right after the showman takes the seat again.
+	 */
+	private onShowmanLeft(): void {
+		if (this.isPaused || this.session.phase === GamePhase.Before) {
+			return;
+		}
+
+		this.isPausedByShowmanLeave = true;
+		this.pauseGame();
+
+		// Everybody should understand why the game has stopped
+		this.sendAll(buildMessage(GameMessage.Replic, 's', 'Показ ведущего прерван: игра на паузе до его возвращения'));
+	}
+
+	/** Pauses the game: pending steps and the visible timers are frozen. */
+	private pauseGame(): void {
+		if (this.isPaused) {
+			return;
+		}
+
+		this.pauseSteps();
+		this.roundTimeLeft = this.getRoundTimeLeft();
+		const elapsed = this.visibleTimers.map(timer => {
+			if (!timer) return 0;
+			if (timer.running) timer.elapsed = Math.min(timer.maximum, timer.elapsed + (Date.now() - timer.startedAt) / 100);
+			timer.running = false;
+			return Math.floor(timer.elapsed);
+		});
+		this.sendAll(buildMessage(GameMessage.Pause, '+', ...elapsed));
+	}
+
+	/** Resumes the paused game. */
+	private resumeGame(): void {
+		if (!this.isPaused) {
+			return;
+		}
+
+		for (const timer of this.visibleTimers) {
+			if (timer) { timer.startedAt = Date.now(); timer.running = true; }
+		}
+		this.resumeSteps();
+		this.sendAll(buildMessage(GameMessage.Pause, '-', 0, 0, 0));
+		const waiting = this.waitingAnswerMedia;
+		if (waiting?.completedWhilePaused) {
+			this.waitingAnswerMedia = null;
+			this.cancelMainStep();
+			waiting.advance();
+		}
+	}
+
+	/** Resumes the game that was paused because of the absent showman. */
+	private resumeAfterShowmanReturn(): void {
+		if (!this.isPausedByShowmanLeave) {
+			return;
+		}
+
+		this.isPausedByShowmanLeave = false;
+		this.resumeGame();
 	}
 
 	/** Frees the seat of a person that has left the room. */
@@ -372,6 +454,11 @@ export class Game {
 
 		person.isConnected = isConnected;
 
+		// The showman is back: the game that was paused for its absence continues
+		if (isConnected && person.role === PersonRole.Showman) {
+			this.resumeAfterShowmanReturn();
+		}
+
 		this.sendAll(buildMessage(
 			GameMessage.Connected,
 			person.role === PersonRole.Showman ? 'showman' : person.role === PersonRole.Player ? 'player' : 'viewer',
@@ -414,7 +501,7 @@ export class Game {
 		if (personName === this.getManagerName()) {
 			const pendingIndex = this.answersToValidate.keys().next().value;
 			if (pendingIndex !== undefined) {
-				this.sendTo(personName, buildMessage(GameMessage.AskValidate, pendingIndex, '', '-'));
+				this.sendTo(personName, this.buildAskValidate(pendingIndex));
 			}
 		}
 
@@ -1399,6 +1486,7 @@ export class Game {
 
 		this.atoms = buildContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item));
 		this.answerOptions = buildAnswerOptions(question, item => this.resolveMedia(item));
+		this.applyAnswerRestrictions(question);
 
 		const questionType = question.type ?? '';
 		const isDefault = questionType === '' || questionType === 'simple';
@@ -1417,6 +1505,32 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.PlayerState, 'None'));
 
 		this.scheduleMain(0.5, () => this.showNextAtom());
+	}
+
+	/**
+	 * Reads the restrictions of the question.
+	 * A stake question (`price` parameter) is played only by the players whose score is bigger than the minimum stake,
+	 * and a question with `selectionMode=exceptCurrent` is not answered by the player who has chosen it.
+	 */
+	private applyAnswerRestrictions(question: Question): void {
+		const minimum = question.params.price?.numberSet?.minimum ?? 0;
+
+		this.minimumAnswererSum = Number.isFinite(minimum) && minimum > 0 ? minimum : 0;
+		this.excludedAnswererIndex = question.params.selectionMode === 'exceptCurrent' ? this.session.chooserIndex : -1;
+	}
+
+	/** True when the player is allowed to answer the current question. */
+	private canAnswerQuestion(index: number, player: GamePerson | undefined): boolean {
+		if (!player) {
+			return false;
+		}
+
+		if (index === this.excludedAnswererIndex) {
+			return false;
+		}
+
+		// The minimum stake is a threshold, not a permission: the score must be bigger than it
+		return this.minimumAnswererSum <= 0 || player.sum > this.minimumAnswererSum;
 	}
 
 	/** Sends answer hints privately to the showman, never to players or spectators. */
@@ -1608,13 +1722,17 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.Timer, 1, 'STOP'));
 		this.sendAll(buildMessage(GameMessage.EndTry, index));
 
+		// A question with answer options is checked by the server itself: the player just picks an option,
+		// so the showman does not assess the answer even in an oral game
+		const isChoiceQuestion = this.answerOptions.length > 0;
+
 		if (answerer.isHuman && answerer.isConnected) {
-			if (this.options.oral) {
+			if (this.options.oral && !isChoiceQuestion) {
 				this.askToValidate(index);
 				return;
 			}
 			const answerTime = this.getTimeSettings().timeForPrintingAnswer;
-			this.sendTo(answerer.name, buildMessage(GameMessage.Answer, 'text'));
+			this.sendTo(answerer.name, buildMessage(GameMessage.Answer, isChoiceQuestion ? 'select' : 'text'));
 			this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, index));
 
 			this.scheduleMain(answerTime, () => {
@@ -1637,6 +1755,12 @@ export class Game {
 
 		if (!question) {
 			return '';
+		}
+
+		// A choice question is answered by an option label, otherwise the server would not accept it
+		if (this.answerOptions.length > 0) {
+			const option = this.answerOptions[Math.floor(Math.random() * this.answerOptions.length)];
+			return option?.label ?? '';
 		}
 
 		const right = question.right.answer;
@@ -1669,6 +1793,19 @@ export class Game {
 			return;
 		}
 
+		// A choice question is checked by the server: the player sends the label of the chosen option
+		if (this.answerOptions.length > 0) {
+			const label = this.findAnswerOptionLabel(answer);
+
+			// Only an offered option could be sent, an arbitrary text is not an answer
+			if (label === null) {
+				return;
+			}
+
+			this.validateAnswer(index, label, this.isAnswerRight(label));
+			return;
+		}
+
 		// Oral responses are spoken and assessed by the manager, not submitted as text.
 		if (this.options.oral) return;
 
@@ -1689,7 +1826,16 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 		this.answersToValidate.set(playerIndex, Date.now());
 		this.session.players[playerIndex].answer = '';
-		this.sendTo(managerName, buildMessage(GameMessage.AskValidate, playerIndex, '', '-'));
+		this.sendTo(managerName, this.buildAskValidate(playerIndex));
+	}
+
+	/**
+	 * The request to assess an answer of a player.
+	 * The spoken answer is never typed, so the text stays empty; the trailing `+` asks the client
+	 * to show the full set of decisions (`×0.5`, `×2`, the plain one and the cancellation).
+	 */
+	private buildAskValidate(playerIndex: number): string {
+		return buildMessage(GameMessage.AskValidate, playerIndex, this.session.players[playerIndex]?.answer ?? '', '+');
 	}
 
 	private handleAnswerVersion(sender: string, answer: string): void {
@@ -1713,6 +1859,19 @@ export class Game {
 		}
 
 		this.session.players[index].answer = answer;
+	}
+
+	/**
+	 * Returns the label of the option that matches the answer of the player.
+	 * The client sends the label, but the content of the option is accepted as well.
+	 */
+	private findAnswerOptionLabel(answer: string): string | null {
+		const normalized = this.normalizeAnswer(answer);
+
+		const option = this.answerOptions.find(item => this.normalizeAnswer(item.label) === normalized
+			|| this.normalizeAnswer(item.value) === normalized);
+
+		return option?.label ?? null;
 	}
 
 	private isAnswerRight(answer: string): boolean {
@@ -1742,11 +1901,32 @@ export class Game {
 		return value.trim().toLocaleLowerCase().replaceAll('ё', 'е').replace(/\s+/g, ' ').replace(/[.!?]+$/g, '');
 	}
 
-	/** Applies the answer of a player. */
-	private validateAnswer(playerIndex: number, answer: string, isRight: boolean): void {
+	/**
+	 * Applies the answer of a player.
+	 * `factor` scales the price of the question: `0.5` and `2` are set by the showman, `0` cancels the answer.
+	 */
+	private validateAnswer(playerIndex: number, answer: string, isRight: boolean, factor = 1): void {
 		const { session } = this;
 
 		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
+			return;
+		}
+
+		// A cancelled answer neither rewards nor penalises the player: the question simply goes on
+		if (factor === 0) {
+			this.answeredPlayers.add(playerIndex);
+			if (session.answererIndex === playerIndex) session.answererIndex = -1;
+			this.pendingPressers = this.pendingPressers.filter(index => index !== playerIndex);
+			this.answersToValidate.delete(playerIndex);
+			this.cancelMainStep();
+			this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
+
+			if (this.areOnlyPassedPlayersLeft()) {
+				this.finishQuestionWithoutAnswer();
+				return;
+			}
+
+			this.scheduleMain(1, () => this.beginPressPhase());
 			return;
 		}
 
@@ -1765,7 +1945,7 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 
 		if (isRight) {
-			const reward = session.currentPrice;
+			const reward = Math.round(session.currentPrice * factor);
 			player.sum += reward;
 			player.state = 'Right';
 
@@ -1776,7 +1956,7 @@ export class Game {
 			return;
 		}
 
-		const penalty = this.getPenaltyAmount();
+		const penalty = Math.round(this.getPenaltyAmount() * factor);
 		player.sum -= penalty;
 		player.state = 'Wrong';
 
@@ -2186,6 +2366,7 @@ export class Game {
 		return this.session.players
 			.map((player, index) => ({ player, index }))
 			.filter(({ player, index }) => this.isActiveSeat(player) && player.state !== 'Pass' && !this.answeredPlayers.has(index))
+			.filter(({ player, index }) => this.canAnswerQuestion(index, player))
 			.map(({ index }) => index);
 	}
 
@@ -2205,8 +2386,10 @@ export class Game {
 	private areOnlyPassedPlayersLeft(): boolean {
 		const active = this.session.players
 			.map((player, index) => ({ player, index }))
-			.filter(({ player, index }) => this.isActiveSeat(player) && !this.answeredPlayers.has(index));
+			.filter(({ player, index }) => this.isActiveSeat(player) && !this.answeredPlayers.has(index))
+			.filter(({ player, index }) => this.canAnswerQuestion(index, player));
 
+		// Nobody is allowed to answer (e.g. everybody is below the minimum stake): the question is over
 		return active.length === 0 || active.every(({ player }) => player.state === 'Pass');
 	}
 
@@ -2697,30 +2880,15 @@ export class Game {
 		}
 
 		// The server drives all timings, so a pause freezes pending steps and the round timer
+		// An explicit decision of the manager overrides the automatic pause made for the absent showman
+		this.isPausedByShowmanLeave = false;
+
 		if (isPaused) {
-			this.pauseSteps();
-			this.roundTimeLeft = this.getRoundTimeLeft();
-			const elapsed = this.visibleTimers.map(timer => {
-				if (!timer) return 0;
-				if (timer.running) timer.elapsed = Math.min(timer.maximum, timer.elapsed + (Date.now() - timer.startedAt) / 100);
-				timer.running = false;
-				return Math.floor(timer.elapsed);
-			});
-			this.sendAll(buildMessage(GameMessage.Pause, '+', ...elapsed));
+			this.pauseGame();
 			return;
 		}
 
-		for (const timer of this.visibleTimers) {
-			if (timer) { timer.startedAt = Date.now(); timer.running = true; }
-		}
-		this.resumeSteps();
-		this.sendAll(buildMessage(GameMessage.Pause, '-', 0, 0, 0));
-		const waiting = this.waitingAnswerMedia;
-		if (waiting?.completedWhilePaused) {
-			this.waitingAnswerMedia = null;
-			this.cancelMainStep();
-			waiting.advance();
-		}
+		this.resumeGame();
 	}
 
 	/** Score value used instead of `''` when an option is broadcast. */
@@ -2866,8 +3034,15 @@ export class Game {
 			return;
 		}
 
-		const subject = args[1] ?? '';
-		const sign = args[2] === '+' || args[2] === '-' ? args[2] : '+';
+		// `ISRIGHT\n<sign>\n<factor>` (an older decision message) has no answer in it,
+		// while `VALIDATE\n<answer>\n<sign>\n<factor>` starts with the text of the answer
+		const legacySign = args[1] === '+' || args[1] === '-' ? args[1] : null;
+		const subject = legacySign === null ? args[1] ?? '' : '';
+		const sign = legacySign ?? (args[2] === '+' || args[2] === '-' ? args[2] : '+');
+
+		// The showman picks the multiplier of the decision: the plain price, a half or a double one.
+		// A zero multiplier means the answer is cancelled without any penalty (the `Pass` button).
+		const factor = this.parseFactor(legacySign === null ? args[3] : args[2]);
 
 		// The answer text is matched first: an answer could be a number too, so an index is used only as a fallback
 		const answeredIndex = this.findAnswererByAnswer(subject);
@@ -2879,7 +3054,21 @@ export class Game {
 
 		const answer = answeredIndex >= 0 ? subject : this.session.players[index].answer;
 
-		this.validateAnswer(index, answer, sign === '+');
+		this.validateAnswer(index, answer, sign === '+', factor);
+	}
+
+	/**
+	 * Reads the decision multiplier sent by the showman (`0`, `0.5`, `1`, `2`).
+	 * Unknown or missing values mean the plain price, so an old client keeps working.
+	 */
+	private parseFactor(value: string | undefined): number {
+		const factor = Number(value);
+
+		if (value === undefined || value === '' || !Number.isFinite(factor) || factor < 0 || factor > MAX_ANSWER_FACTOR) {
+			return 1;
+		}
+
+		return factor;
 	}
 
 	/** Finds the player by its index in the request of the showman. */

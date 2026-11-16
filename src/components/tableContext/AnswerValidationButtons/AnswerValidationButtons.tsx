@@ -5,6 +5,30 @@ import localization from '../../../model/resources/localization';
 
 import './AnswerValidationButtons.scss';
 
+/** Score multipliers offered for every decision: the plain answer, half price and double price. */
+const FACTORS: { factor: number; extra: boolean; }[] = [
+	{ factor: 1.0, extra: false },
+	{ factor: 0.5, extra: true },
+	{ factor: 2.0, extra: true },
+];
+
+function getFactorTitle(factor: number): string {
+	switch (factor) {
+		case 0.5:
+			return localization.halfPrice;
+
+		case 2.0:
+			return localization.doublePrice;
+
+		default:
+			return localization.fullPrice;
+	}
+}
+
+function getFactorLabel(factor: number): string {
+	return factor === 1.0 ? '' : `×${factor}`;
+}
+
 export default function AnswerValidationButtons(): JSX.Element | null {
 	const appDispatch = useAppDispatch();
 	const validation = useAppSelector(state => state.room2.validation);
@@ -43,40 +67,39 @@ export default function AnswerValidationButtons(): JSX.Element | null {
 		blockButtons();
 	};
 
+	// The plain decision is always available; the multiplier buttons come with the full set of decisions
+	const showExtraButtons = validation.showExtraRightButtons;
+
+	// Every decision has three multipliers: ×1 (the answer itself), ×0.5 and ×2.
+	// Three of them are for the right answer and three of them are for the wrong one.
+	const renderButtons = (
+		onClick: (factor: number) => void,
+		buttonClassName: string,
+		icon: string,
+		accessibleName: string,
+	) => FACTORS
+		.filter(({ extra }) => !extra || showExtraButtons)
+		.map(({ factor, extra }) => (
+			<button
+				key={factor}
+				type="button"
+				title={`${getFactorTitle(factor)} — ${accessibleName}`}
+				aria-label={`${icon} ${getFactorLabel(factor) || getFactorTitle(factor)}`}
+				className={`standard validationButton ${buttonClassName}${extra ? ` extraButton ${factor < 1 ? 'halfPrice' : 'doublePrice'}` : ''}`}
+				disabled={!isConnected || buttonsBlocked}
+				onClick={() => onClick(factor)}>
+				{getFactorLabel(factor) || icon}
+			</button>
+		));
+
 	return (
 		<div className='answerValidationButtons'>
-
-
 			<div className="buttonsPanel">
 				<div className='buttonsArea'>
-					<button
-						type="button"
-						className='standard validationButton acceptButton'
-						disabled={!isConnected || buttonsBlocked}
-						onClick={() => onApprove(1.0)}>
-						{localization.yes}
-					</button>
-
-					{validation.showExtraRightButtons ? (<>
-						<button
-							type="button"
-							className='standard halfPrice extraButton acceptButton'
-							disabled={!isConnected || buttonsBlocked}
-							onClick={() => onApprove(0.5)}>
-							×0.5
-						</button>
-
-						<button
-							type="button"
-							className='standard doublePrice extraButton acceptButton'
-							disabled={!isConnected || buttonsBlocked}
-							onClick={() => onApprove(2.0)}>
-							×2
-						</button>
-					</>) : null}
+					{renderButtons(onApprove, 'acceptButton', localization.yes, localization.rightAnswer)}
 				</div>
 
-				{validation.showExtraRightButtons ? (
+				{showExtraButtons ? (
 					<div className='buttonsArea passArea'>
 						<button
 							type='button'
@@ -90,31 +113,7 @@ export default function AnswerValidationButtons(): JSX.Element | null {
 				) : null}
 
 				<div className='buttonsArea'>
-					<button
-						type="button"
-						className='standard validationButton rejectButton'
-						disabled={!isConnected || buttonsBlocked}
-						onClick={() => onReject(1.0)}>
-						{localization.no}
-					</button>
-
-					{validation.showExtraRightButtons ? (<>
-						<button
-							type="button"
-							className='standard halfPrice extraButton rejectButton'
-							disabled={!isConnected || buttonsBlocked}
-							onClick={() => onReject(0.5)}>
-							×0.5
-						</button>
-
-						<button
-							type="button"
-							className='standard doublePrice extraButton rejectButton'
-							disabled={!isConnected || buttonsBlocked}
-							onClick={() => onReject(2.0)}>
-							×2
-						</button>
-					</>) : null}
+					{renderButtons(onReject, 'rejectButton', localization.no, localization.wrongAnswer)}
 				</div>
 			</div>
 		</div>

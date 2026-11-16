@@ -71,7 +71,7 @@ describe('Reported game regressions', () => {
 		expect(messages.Bob.some(text => text.startsWith('QUESTION_ANSWERS'))).toBe(false);
 		expect(messages.Host.some(text => text.startsWith('ASK_VALIDATE'))).toBe(false);
 		game.handleClientMessage('Alice', 'I\n0');
-		expect(messages.Host).toContain('ASK_VALIDATE\n0\n\n-');
+		expect(messages.Host).toContain('ASK_VALIDATE\n0\n\n+');
 		expect(messages.Alice).not.toContain('ANSWER\ntext');
 		expect(messages.Bob).not.toContain('ANSWER\ntext');
 		game.handleClientMessage('Alice', 'ANSWER\nyes');
@@ -85,7 +85,7 @@ describe('Reported game regressions', () => {
 		game.handleClientMessage('Host', 'VALIDATE\n\n-\n1');
 		jest.advanceTimersByTime(1000);
 		game.handleClientMessage('Bob', 'I\n0');
-		expect(messages.Host).toContain('ASK_VALIDATE\n1\n\n-');
+		expect(messages.Host).toContain('ASK_VALIDATE\n1\n\n+');
 		expect(messages.Bob).not.toContain('ANSWER\ntext');
 		game.handleClientMessage('Host', 'VALIDATE\n\n+\n1');
 		expect(game.session.players[1].sum).toBe(100);
@@ -105,7 +105,7 @@ describe('Reported game regressions', () => {
 		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
 		jest.advanceTimersByTime(2500);
 		game.handleClientMessage('Bob', 'I\n0');
-		expect(messages.Alice).toContain('ASK_VALIDATE\n1\n\n-');
+		expect(messages.Alice).toContain('ASK_VALIDATE\n1\n\n+');
 		expect(messages.Bob).not.toContain('ANSWER\ntext');
 		jest.advanceTimersByTime(60000);
 		expect(game.session.isQuestionPlaying).toBe(true);
@@ -124,7 +124,7 @@ describe('Reported game regressions', () => {
 		messages.Host.length = 0;
 		game.onReconnect('Host');
 		expect(messages.Host).toContain('QUESTION_ANSWERS\n1\nyes');
-		expect(messages.Host).toContain('ASK_VALIDATE\n0\n\n-');
+		expect(messages.Host).toContain('ASK_VALIDATE\n0\n\n+');
 	});
 
 	it('freezes choice and round timers with elapsed values and continues after resume', () => {

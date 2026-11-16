@@ -70,7 +70,8 @@ describe('Server decision guards', () => {
 		game.setTimeSettings({ timeForThinkingOnQuestion: 5, timeOfRound: 10 });
 		startQuestion();
 		game.handleClientMessage('Alice', 'I\n0');
-		expect(hostMessages).toContain('ASK_VALIDATE\n0\n\n-');
+		// The trailing `+` asks the client for the full set of decisions, the answer text stays empty
+		expect(hostMessages).toContain('ASK_VALIDATE\n0\n\n+');
 		expect(received).toContain('TIMER\n2\nSTOP');
 		game.handleClientMessage('Bob', 'ANSWER\nyes');
 		game.handleClientMessage('Host', 'MOVE\n1');

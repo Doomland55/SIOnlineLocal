@@ -28,6 +28,7 @@ const ALL_SCRIPTS = [
 	'answer-options-test.js',
 	'host-rights-test.js',
 	'midgame-rules-test.js',
+	'validation-factors-test.js',
 	'access-test.js',
 ];
 
