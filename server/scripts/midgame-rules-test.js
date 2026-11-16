@@ -5,8 +5,8 @@
  * 1. Правила, изменённые ведущим во время игры (`SET_OPTIONS`), применяются и рассылаются всем:
  *    игрок тоже получает `OPTIONS2`; имя `TimeForBlockingButton` доходит до клиента как известное
  *    ему `ButtonBlocking`.
- * 2. Устная игра (`Oral`): приглашение ответа получает только нажавший игрок;
- *    ведущий подтверждает ответ (`VALIDATE`).
+ * 2. Устная игра (`Oral`): после нажатия ведущий видит ответ пакета и сразу оценивает устный ответ;
+ *    поле ввода игроку не отправляется.
  * 3. Если все игроки нажали «пас», вопрос завершается и показывается правильный ответ.
  * 4. Таблица раунда сохраняет исходную размерность: сыгранные вопросы скрываются (цена -1),
  *    темы не исчезают из `ROUND_THEMES2` / `THEME` / `TABLO2`.
@@ -165,31 +165,22 @@ async function main() {
 		assert.ok(blocking.includes('\nButtonBlocking\n7'), `время блокировки кнопки пришло под неизвестным клиенту именем: ${blocking}`);
 		console.log('  rules changed in the middle of the game reach every client');
 
-		// 2. Oral game: only the player who presses gets the answer prompt; the showman confirms it.
-		player.messages.length = 0;
-		await playQuestion(host, player, 0, 0);
-		await waitFor(player.messages, text => text === 'TRY', 25000, 'фазы нажатия кнопки');
-		assert.ok(!player.messages.some(text => text.startsWith('ANSWER\n')), 'приглашения не должно быть до нажатия');
-		await player.send('I\n0');
-		await waitFor(player.messages, text => text.startsWith('ANSWER\n'), 25000, 'приглашения к ответу после нажатия');
-
+		// 2. The player speaks; the host sees the solution and judges immediately after the press.
 		player.messages.length = 0;
 		host.messages.length = 0;
-		await player.send('ANSWER\n4');
-
-		// The answer goes to the showman: they confirm it, and only then the score is given
-		const askValidate = await waitFor(host.messages, text => text.startsWith('ASK_VALIDATE'), 20000, 'запроса на проверку ответа у ведущего');
-		assert.strictEqual(askValidate.split('\n')[2], '4', `ведущий должен увидеть ответ игрока: ${askValidate}`);
-
-		assert.ok(
-			!player.messages.some(text => text.startsWith('PERSON')),
-			'очки не должны начисляться до подтверждения ведущим',
-		);
-
-		// The client sends the answer text, not the player index
-		await host.send('VALIDATE\n4\n+\n1');
-		await waitFor(player.messages, text => text.startsWith('PERSON\n+'), 20000, 'присуждения очка после подтверждения');
-		console.log('  oral game: only the player who pressed answers; the showman confirms');
+		await playQuestion(host, player, 0, 0);
+		await waitFor(player.messages, text => text === 'TRY', 25000, 'фазы нажатия кнопки');
+		const answers = await waitFor(host.messages, text => text.startsWith('QUESTION_ANSWERS\n'), 15000, 'правильных ответов ведущему');
+		assert.ok(answers.includes('\n4'), `ведущий должен видеть правильный ответ: ${answers}`);
+		assert.ok(!player.messages.some(text => text.startsWith('QUESTION_ANSWERS\n')), 'ответ не должен утечь игроку');
+		await player.send('I\n0');
+		const askValidate = await waitFor(host.messages, text => text.startsWith('ASK_VALIDATE'), 20000, 'проверки устного ответа');
+		assert.strictEqual(askValidate, 'ASK_VALIDATE\n0\n\n-');
+		assert.ok(!player.messages.some(text => text.startsWith('ANSWER\n')), 'поле ответа не должно появляться');
+		assert.ok(!player.messages.some(text => text.startsWith('PERSON\n')), 'очки до проверки не начисляются');
+		await host.send('VALIDATE\n\n+\n1');
+		await waitFor(player.messages, text => text.startsWith('PERSON\n+'), 20000, 'присуждения очка после проверки');
+		console.log('  oral game: host sees answer and decides immediately; player has no text input');
 
 		await host.send('SET_OPTIONS\nOral\nfalse');
 		await waitFor(host.messages, text => text.startsWith('OPTIONS2') && text.includes('Oral'), 15000, 'выключения устной игры');

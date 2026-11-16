@@ -22,7 +22,7 @@ import DefaultEndpoints from '../client/system/DefaultEndpoints';
 const MAX_APPEND_TEXT_LENGTH = 150;
 
 function unescapeNewLines(value: string): string {
-	return value.replaceAll('\\n', '\n').replaceAll('\\\\', '\\');
+	return value.replace(/\\(\\|n)/g, (_match, escaped: string) => (escaped === 'n' ? '\n' : '\\'));
 }
 
 function onConfig(controller: ClientController, ...args: string[]) {
@@ -97,7 +97,7 @@ function onValidation(controller: ClientController, title: string, args: string[
 }
 
 function onQuestionAnswers(controller: ClientController, args: string[]) {
-	if (args.length < 3) {
+	if (args.length < 2) {
 		return;
 	}
 
@@ -105,13 +105,13 @@ function onQuestionAnswers(controller: ClientController, args: string[]) {
 	const right = [];
 
 	for (let i = 0; i < rightAnswerCount; i++) {
-		right.push(args[2 + i]);
+		right.push(unescapeNewLines(args[2 + i]));
 	}
 
 	const wrong = [];
 
 	for (let i = 2 + rightAnswerCount; i < args.length; i++) {
-		wrong.push(args[i]);
+		wrong.push(unescapeNewLines(args[i]));
 	}
 
 	controller.onQuestionAnswers(right, wrong);

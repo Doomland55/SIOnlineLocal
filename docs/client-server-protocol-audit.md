@@ -9,7 +9,7 @@
 
 | Команда | Состояние в локальном сервере |
 |---|---|
-| `INFO`, `READY`, `START`, `CHOICE`, `I`, `ANSWER`, `ANSWER_VERSION`, `PASS` | Обрабатываются; для ответа и выбора проверяются текущая фаза и участник. В устной игре приглашение получает нажавший игрок, а ответ проверяет ведущий. |
+| `INFO`, `READY`, `START`, `CHOICE`, `I`, `ANSWER`, `ANSWER_VERSION`, `PASS` | Обрабатываются; для ответа и выбора проверяются текущая фаза и участник. В устной игре игрок отвечает голосом без текстового поля; после нажатия управляющий оценивает ответ. |
 | `SETCHOOSER` | Управляющий задаёт активного игрока при выборе вопроса; старый запрос выбора отменяется. Не работает во время вопроса, финала и паузы. |
 | `CONFIG` | `ADDTABLE`, `DELETETABLE`, `FREE`, `CHANGETYPE`, `SET`. Изменения состава во время вопроса откладываются до его окончания; финал не поддерживает изменения. `SET` не реализует полноценные перестановки людей. |
 | `DELETE` | Только удаление тем финального раунда. |
@@ -38,14 +38,14 @@
 `CONTENT_STATE`, `DISCONNECTED`, `ENDTRY`, `FINALTHINK`, `GAMEMETADATA`, `GAME_STATISTICS`,
 `HOSTNAME`, `INFO2`, `LAYOUT`, `MEDIA_PRELOAD_PROGRESS`, `OPTIONS2`, `OUT`,
 `PACKAGE`, `PASS`, `PAUSE`, `PERSON`, `PERSONFINALSTAKE`, `PERSONSTAKE`, `PIN`, `PLAYER_ANSWER`,
-`PLAYER_COUNT`, `PLAYER_STATE`, `QTYPE`, `QUESTION`, `QUESTIONCAPTION`, `QUESTION_END`, `READY`,
+`PLAYER_COUNT`, `PLAYER_STATE`, `QTYPE`, `QUESTION`, `QUESTIONCAPTION`, `QUESTION_ANSWERS` (только ведущему), `QUESTION_END`, `READY`,
 `REPLIC`, `RIGHTANSWER`, `ROUNDCONTENT`, `ROUNDSNAMES`, `ROUND_END`, `ROUND_THEMES2`,
 `SETCHOOSER`, `SETJOINMODE`, `SHOWTABLO`, `STAGE`, `STOP`, `SUMS`, `TABLO2`, `THEME`, `TIMER`,
 `TRY`, `WINNER`. Клиент объявляет и обрабатывает эти имена, но это не гарантирует совпадения всей семантики.
 
 Отдельное расхождение: сервер отправляет `PERSONFINALANSWER`, но в `GameMessages.ts` и обработчике
 клиента такого сообщения нет. Клиент также знает ряд сообщений, которые локальный сервер сейчас не
-посылает: `ASK_SELECT_PLAYER`, `VALIDATION2`, `APPELLATION`, `QUESTION_ANSWERS`, сведения об авторах
+посылает: `ASK_SELECT_PLAYER`, `VALIDATION2`, `APPELLATION`, сведения об авторах
 и источниках, `TOGGLE`, `BANNED`, `PLAYER_SCORE_CHANGED`, `CONTENT_APPEND`, `RIGHT_ANSWER_START` и др.
 Это ограничивает специальные вопросы, ручную проверку финала, управление и полноту отображения пакета.
 

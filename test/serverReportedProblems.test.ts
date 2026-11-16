@@ -58,35 +58,36 @@ describe('Reported game regressions', () => {
 		expect(messages.Alice).not.toContain('ANSWER\ntext');
 	});
 
-	it('asks only the player who pressed to answer in oral mode, including after a wrong answer and reconnect', () => {
-		start([question(), question()]);
+	it('asks the host to assess a spoken answer immediately and never opens an input', () => {
+		const first: any = question();
+		first.right.answer = ['yes', 'second'];
+		first.wrong = { answer: ['no'] };
+		start([first, question()]);
 		game.setInitialOptions({ oral: true });
 		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
 		jest.advanceTimersByTime(2500);
-		expect(messages.Alice).toContain('TRY');
+		expect(messages.Host).toContain('QUESTION_ANSWERS\n2\nyes\nsecond\nno');
+		expect(messages.Alice.some(text => text.startsWith('QUESTION_ANSWERS'))).toBe(false);
+		expect(messages.Bob.some(text => text.startsWith('QUESTION_ANSWERS'))).toBe(false);
+		expect(messages.Host.some(text => text.startsWith('ASK_VALIDATE'))).toBe(false);
+		game.handleClientMessage('Alice', 'I\n0');
+		expect(messages.Host).toContain('ASK_VALIDATE\n0\n\n-');
 		expect(messages.Alice).not.toContain('ANSWER\ntext');
 		expect(messages.Bob).not.toContain('ANSWER\ntext');
-		game.handleClientMessage('Bob', 'ANSWER\nyes');
-		expect(messages.Host.some(text => text.startsWith('ASK_VALIDATE'))).toBe(false);
-		game.onReconnect('Bob');
-		expect(messages.Bob).not.toContain('ANSWER\ntext');
-		game.handleClientMessage('Alice', 'I\n0');
-		expect(messages.Alice.filter(text => text === 'ANSWER\ntext')).toHaveLength(1);
-		expect(messages.Bob).not.toContain('ANSWER\ntext');
-		game.handleClientMessage('Bob', 'ANSWER\nyes');
-		game.handleClientMessage('Alice', 'ANSWER\nwrong');
-		expect(messages.Host).toContain('ASK_VALIDATE\n0\nwrong\n+');
+		game.handleClientMessage('Alice', 'ANSWER\nyes');
+		game.handleClientMessage('Bob', 'I\n0');
+		game.handleClientMessage('Alice', 'PASS');
 		game.onReconnect('Alice');
-		expect(messages.Alice.filter(text => text === 'ANSWER\ntext')).toHaveLength(1);
+		expect(messages.Alice).not.toContain('ANSWER\ntext');
+		expect(messages.Host.filter(text => text.startsWith('ASK_VALIDATE'))).toHaveLength(1);
 		jest.advanceTimersByTime(60000);
 		expect(game.session.isQuestionPlaying).toBe(true);
-		game.handleClientMessage('Host', 'VALIDATE\nwrong\n-\n1');
+		game.handleClientMessage('Host', 'VALIDATE\n\n-\n1');
 		jest.advanceTimersByTime(1000);
-		expect(messages.Bob).not.toContain('ANSWER\ntext');
 		game.handleClientMessage('Bob', 'I\n0');
-		expect(messages.Bob.filter(text => text === 'ANSWER\ntext')).toHaveLength(1);
-		game.handleClientMessage('Bob', 'ANSWER\nyes');
-		game.handleClientMessage('Host', 'VALIDATE\nyes\n+\n1');
+		expect(messages.Host).toContain('ASK_VALIDATE\n1\n\n-');
+		expect(messages.Bob).not.toContain('ANSWER\ntext');
+		game.handleClientMessage('Host', 'VALIDATE\n\n+\n1');
 		expect(game.session.players[1].sum).toBe(100);
 		jest.advanceTimersByTime(4000);
 		messages.Bob.length = 0;
@@ -94,6 +95,36 @@ describe('Reported game regressions', () => {
 		jest.advanceTimersByTime(2500);
 		game.onReconnect('Bob');
 		expect(messages.Bob).not.toContain('ANSWER\ntext');
+	});
+
+	it('lets a player-manager assess a spoken answer without an automatic timeout', () => {
+		start([question(), question()]);
+		game.session.showman.isHuman = false;
+		game.session.showman.isConnected = false;
+		game.setInitialOptions({ oral: true });
+		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
+		jest.advanceTimersByTime(2500);
+		game.handleClientMessage('Bob', 'I\n0');
+		expect(messages.Alice).toContain('ASK_VALIDATE\n1\n\n-');
+		expect(messages.Bob).not.toContain('ANSWER\ntext');
+		jest.advanceTimersByTime(60000);
+		expect(game.session.isQuestionPlaying).toBe(true);
+		game.handleClientMessage('Alice', 'VALIDATE\n\n+\n1');
+		expect(game.session.players[1].sum).toBe(100);
+	});
+
+	it('sends correct answers only to the showman for normal questions and restores pending oral validation', () => {
+		start([question(), question()]);
+		game.handleClientMessage('Alice', 'CHOICE\n0\n0');
+		jest.advanceTimersByTime(2500);
+		expect(messages.Host).toContain('QUESTION_ANSWERS\n1\nyes');
+		expect(messages.Alice.some(text => text.startsWith('QUESTION_ANSWERS'))).toBe(false);
+		game.setInitialOptions({ oral: true });
+		game.handleClientMessage('Alice', 'I\n0');
+		messages.Host.length = 0;
+		game.onReconnect('Host');
+		expect(messages.Host).toContain('QUESTION_ANSWERS\n1\nyes');
+		expect(messages.Host).toContain('ASK_VALIDATE\n0\n\n-');
 	});
 
 	it('freezes choice and round timers with elapsed values and continues after resume', () => {

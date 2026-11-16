@@ -50,9 +50,6 @@ interface FinalParticipant {
 	draft: string;
 }
 
-/** Seconds that the manager (a player in the showman seat of a server-driven game) has to check an answer. */
-const ORAL_VALIDATION_TIMEOUT = 15;
-
 /** A single game hosted by the local server. */
 export class Game {
 	public readonly session: GameSession;
@@ -409,6 +406,16 @@ export class Game {
 
 		if (!session.isQuestionPlaying) {
 			return;
+		}
+
+		if (personName === session.showman.name && session.showman.isHuman) {
+			this.sendQuestionAnswers(personName);
+		}
+		if (personName === this.getManagerName()) {
+			const pendingIndex = this.answersToValidate.keys().next().value;
+			if (pendingIndex !== undefined) {
+				this.sendTo(personName, buildMessage(GameMessage.AskValidate, pendingIndex, '', '-'));
+			}
 		}
 
 		if (session.phase === GamePhase.Final) {
@@ -1398,6 +1405,7 @@ export class Game {
 		const isNoRisk = questionType === 'noRisk';
 
 		this.sendAll(buildMessage(GameMessage.Question, session.currentPrice));
+		this.sendQuestionAnswers(session.showman.name);
 		this.sendAll(buildMessage(GameMessage.QuestionCaption, theme?.name ?? ''));
 		this.sendAll(buildMessage(GameMessage.QType, questionType || 'simple', isDefault ? 'True' : 'False', isNoRisk ? 'True' : 'False'));
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
@@ -1409,6 +1417,15 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.PlayerState, 'None'));
 
 		this.scheduleMain(0.5, () => this.showNextAtom());
+	}
+
+	/** Sends answer hints privately to the showman, never to players or spectators. */
+	private sendQuestionAnswers(personName: string): void {
+		const question = this.session.currentQuestion;
+		if (!question || personName !== this.session.showman.name || !this.session.showman.isHuman) return;
+		const right = question.right.answer.map(escapeNewLines);
+		const wrong = (question.wrong?.answer ?? []).map(escapeNewLines);
+		this.sendTo(personName, buildMessage(GameMessage.QuestionAnswers, right.length, ...right, ...wrong));
 	}
 
 	private sendLayout(): void {
@@ -1592,6 +1609,10 @@ export class Game {
 		this.sendAll(buildMessage(GameMessage.EndTry, index));
 
 		if (answerer.isHuman && answerer.isConnected) {
+			if (this.options.oral) {
+				this.askToValidate(index);
+				return;
+			}
 			const answerTime = this.getTimeSettings().timeForPrintingAnswer;
 			this.sendTo(answerer.name, buildMessage(GameMessage.Answer, 'text'));
 			this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, index));
@@ -1648,63 +1669,27 @@ export class Game {
 			return;
 		}
 
-		// In an oral game the showman decides whether the answer is right, so the answer goes to them
-		if (this.options.oral) {
-			this.askToValidate(index, answer);
-			return;
-		}
+		// Oral responses are spoken and assessed by the manager, not submitted as text.
+		if (this.options.oral) return;
 
 		this.validateAnswer(index, answer, this.isAnswerRight(answer));
 	}
 
-	/**
-	 * Sends the answer of a player to the showman of an oral game.
-	 * The showman answers with `VALIDATE\n<playerIndex>\n<+|->\n<factor>`.
-	 */
-	private askToValidate(playerIndex: number, answer: string): void {
-		const { session } = this;
+	/** Starts a manual decision for the spoken answer without soliciting text. */
+	private askToValidate(playerIndex: number): void {
 		const managerName = this.getManagerName();
 		const manager = managerName ? this.session.findPerson(managerName) : null;
-
-		// Nobody could check the answer: the game accepts it on its own, so the question does not hang
 		if (!manager || !manager.isHuman || !manager.isConnected) {
-			this.validateAnswer(playerIndex, answer, this.isAnswerRight(answer));
+			this.validateAnswer(playerIndex, '', false);
 			return;
 		}
 
-		// The answering deadline and bot actions must not
-		// finish the question while a human showman is deciding on this answer.
+		// Freeze the question until the manager decides; the independent round deadline remains.
 		this.cancelPending(true);
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 		this.answersToValidate.set(playerIndex, Date.now());
-		session.players[playerIndex].answer = answer;
-		this.sendAll(buildMessage(GameMessage.PlayerAnswer, playerIndex, answer));
-		this.sendTo(managerName, buildMessage(GameMessage.AskValidate, playerIndex, answer, '+'));
-
-		// A manager that is a player (the server drives the showman seat) does not get the validation
-		// buttons of the showman, so the decision must not wait for them forever
-		if (manager.role !== PersonRole.Showman) {
-			this.scheduleValidationTimeout(playerIndex, answer);
-		}
-	}
-
-	/** Gives the manager some time to check the answer; after that the answer is checked automatically. */
-	private scheduleValidationTimeout(playerIndex: number, answer: string): void {
-		this.answersToValidate.set(playerIndex, Date.now());
-
-		this.schedule(ORAL_VALIDATION_TIMEOUT, () => {
-			if (!this.answersToValidate.has(playerIndex)) {
-				return;
-			}
-
-			if (!this.session.isQuestionPlaying || this.session.isQuestionAnswerShown) {
-				this.answersToValidate.delete(playerIndex);
-				return;
-			}
-
-			this.answersToValidate.delete(playerIndex);
-			this.validateAnswer(playerIndex, answer, this.isAnswerRight(answer));
-		});
+		this.session.players[playerIndex].answer = '';
+		this.sendTo(managerName, buildMessage(GameMessage.AskValidate, playerIndex, '', '-'));
 	}
 
 	private handleAnswerVersion(sender: string, answer: string): void {
@@ -1722,7 +1707,7 @@ export class Game {
 			return;
 		}
 
-		if (this.isPaused || !this.session.isQuestionPlaying || this.session.isQuestionAnswerShown
+		if (this.isPaused || this.options.oral || !this.session.isQuestionPlaying || this.session.isQuestionAnswerShown
 			|| this.session.answererIndex !== index || this.answersToValidate.has(index)) {
 			return;
 		}
@@ -2144,6 +2129,7 @@ export class Game {
 		this.answerOptions = buildAnswerOptions(question, item => this.resolveMedia(item));
 
 		this.sendAll(buildMessage(GameMessage.Question, session.currentPrice));
+		this.sendQuestionAnswers(session.showman.name);
 		this.sendAll(buildMessage(GameMessage.QuestionCaption, session.themes[themeIndex].name));
 		this.sendAll(buildMessage(GameMessage.QType, question.type || 'simple', 'True', 'False'));
 
@@ -2170,7 +2156,7 @@ export class Game {
 		const { session } = this;
 		const index = session.getPlayerIndex(sender);
 
-		if (index < 0 || session.phase !== GamePhase.Round) {
+		if (index < 0 || session.phase !== GamePhase.Round || this.answersToValidate.has(index)) {
 			return;
 		}
 
@@ -2186,7 +2172,7 @@ export class Game {
 		session.players[index].state = 'Pass';
 		this.pendingPressers = this.pendingPressers.filter(value => value !== index);
 
-		if (!this.areOnlyPassedPlayersLeft()) {
+		if (this.answersToValidate.size > 0 || !this.areOnlyPassedPlayersLeft()) {
 			return;
 		}
 
@@ -2872,7 +2858,7 @@ export class Game {
 		// The showman of an oral game marks the answer of a player as right or wrong.
 		// The client sends the answer text (`VALIDATE\n<answer>\n<+|->\n<factor>`),
 		// the answerer could be sent by its index too (that is what `ASK_VALIDATE` gives)
-		if (!this.canManage(person) || !this.options.oral) {
+		if (!this.canManage(person) || this.answersToValidate.size === 0) {
 			return;
 		}
 
