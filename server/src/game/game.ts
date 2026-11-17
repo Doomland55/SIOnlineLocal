@@ -1,6 +1,8 @@
+import path from 'path';
 import { Question } from '../../../src/model/siquester/package';
 import { buildMessage, escapeNewLines, GameMessage, GameStage, MediaCategory, SERVER_HOST_PLACEHOLDER } from '../protocol';
 import { AnswerOptionPlan, buildAnswerOptions, buildContentAtoms, ContentAtom, getAnswerContentAtoms } from './questionPlan';
+import { readMediaDuration } from './mediaDuration';
 import { getMediaUrl, LoadedPackage, MEDIA_ROUTE_PREFIX, resolveMediaPath } from './package';
 import { GamePerson, GamePhase, GameSession, isEmptySlotName, MAX_PLAYER_COUNT, PersonRole } from './session';
 
@@ -87,6 +89,12 @@ export class Game {
 
 	/** Players who can press the button in the current question. */
 	private pendingPressers: number[] = [];
+
+	/**
+	 * The button of the current question waits for a video or a sound to play,
+	 * so the players answer in the middle of it (or after the `duration` from the package).
+	 */
+	private pressPending: { atom: ContentAtom; delay: number; step?: PendingStep } | null = null;
 
 	/**
 	 * Minimum score that a player must have to answer the current question.
@@ -670,6 +678,7 @@ export class Game {
 	/** Cancels all pending steps. */
 	private cancelPending(preserveRound = false): void {
 		this.waitingAnswerMedia = null;
+		this.pressPending = null;
 		this.mainStep = null;
 		for (const step of this.pendingSteps) {
 			if (step.timeout && (!preserveRound || step !== this.roundStep)) {
@@ -1337,6 +1346,55 @@ export class Game {
 		};
 	}
 
+	/**
+	 * Real duration (seconds) of a package media file, or null when it is an external link
+	 * or the file could not be read. Durations are cached: the same file is played many times.
+	 */
+	private getMediaDuration(item: { type: string; value: string; isRef: boolean }): number | null {
+		if (item.type !== 'video' && item.type !== 'audio') {
+			return null;
+		}
+
+		const mediaPath = resolveMediaPath(this.session.packageInfo, item as never);
+
+		if (!mediaPath) {
+			return null;
+		}
+
+		const cacheKey = `${this.session.packageInfo.id}:${mediaPath}`;
+
+		if (this.mediaDurations.has(cacheKey)) {
+			return this.mediaDurations.get(cacheKey) ?? null;
+		}
+
+		const filePath = path.join(this.session.packageInfo.rootDir, mediaPath);
+		const duration = readMediaDuration(filePath);
+
+		// A missing or broken file must not be re-read for every question
+		this.mediaDurations.set(cacheKey, duration);
+		return duration;
+	}
+
+	private readonly mediaDurations = new Map<string, number | null>();
+
+	/**
+	 * Delays the button of the current question for the first video or sound atom.
+	 *
+	 * The players press the button in the middle of the media, and an explicit `duration`
+	 * of the item tells that the meaningful part lasts that long: the button waits for it.
+	 */
+	private buildPressDelay(): { atom: ContentAtom; delay: number; step?: PendingStep } | null {
+		const atom = this.atoms.find(item => (item.pressDelay ?? 0) > 0 && item.placement !== 'background');
+
+		if (!atom) {
+			return null;
+		}
+
+		// The button must stay available even for an extremely long media
+		const delay = Math.max(0, Math.min(atom.pressDelay ?? 0, atom.duration / 10));
+		return delay > 0 ? { atom, delay } : null;
+	}
+
 	/** Asks the chooser to select a question. */
 	askToSelectQuestion(): void {
 		const { session } = this;
@@ -1519,6 +1577,7 @@ export class Game {
 		this.answeredPlayers.clear();
 		this.answersToValidate.clear();
 		this.pendingPressers = [];
+		this.pressPending = null;
 		this.atomIndex = 0;
 
 
@@ -1528,9 +1587,15 @@ export class Game {
 			player.stake = 0;
 		}
 
-		this.atoms = buildContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item));
+		this.atoms = buildContentAtoms(
+			question,
+			this.options.readingSpeed,
+			item => this.resolveMedia(item),
+			item => this.getMediaDuration(item),
+		);
 		this.answerOptions = buildAnswerOptions(question, item => this.resolveMedia(item));
 		this.applyAnswerRestrictions(question);
+		this.pressPending = this.buildPressDelay();
 
 		const questionType = question.type ?? '';
 		const isDefault = questionType === '' || questionType === 'simple';
@@ -1635,6 +1700,7 @@ export class Game {
 		}
 
 		this.sendAll([GameMessage.Content2, 'screen', 0, '', atom.type, '', atom.value].join('\n'));
+		this.armPressDelay(atom);
 
 		if (!atom.waitForFinish) {
 			this.showNextAtom();
@@ -1680,9 +1746,58 @@ export class Game {
 		showNext();
 	}
 
-	/** Enables button pressing for the players. */
+	/**
+	 * Enables button pressing for the players.
+	 *
+	 * A video or a sound question keeps the button disabled until the media has played long enough:
+	 * the players answer in the middle of it (or after the `duration` from the package).
+	 */
 	private beginPressPhase(): void {
 		const { session } = this;
+
+		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
+			return;
+		}
+
+		const pending = this.pressPending;
+
+		if (pending) {
+			// The timer of the media is already running: the button is enabled by it
+			if (pending.step) {
+				return;
+			}
+
+			this.pressPending = null;
+		}
+
+		this.enablePressPhase();
+	}
+
+	/**
+	 * Starts the button timer of a media atom.
+	 * The timer runs in parallel with the content, so the players can answer in the middle of the media.
+	 */
+	private armPressDelay(atom: ContentAtom): void {
+		const pending = this.pressPending;
+
+		// The button of the question is already known: no need to wait for the media
+		if (!pending || pending.atom !== atom || pending.step || pending.delay <= 0 || this.pendingPressers.length > 0) {
+			return;
+		}
+
+		if (!this.session.isQuestionPlaying || this.session.isQuestionAnswerShown) {
+			return;
+		}
+
+		// The delay is an independent step: the content keeps its own main step
+		pending.step = this.schedule(pending.delay, () => this.enablePressPhase());
+	}
+
+	/** Starts the press phase right now. */
+	private enablePressPhase(): void {
+		const { session } = this;
+
+		this.pressPending = null;
 
 		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
 			return;
@@ -1963,6 +2078,7 @@ export class Game {
 			this.pendingPressers = this.pendingPressers.filter(index => index !== playerIndex);
 			this.answersToValidate.delete(playerIndex);
 			this.cancelMainStep();
+			this.pressPending = null;
 			this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 
 			if (this.areOnlyPassedPlayersLeft()) {
@@ -2112,6 +2228,7 @@ export class Game {
 		this.pressTurn += 1;
 		this.closingQuestion = true;
 		this.pendingPressers = [];
+		this.pressPending = null;
 		this.cancelPending(true);
 		this.restoreRoundTimer();
 

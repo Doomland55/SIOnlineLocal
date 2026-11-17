@@ -23,6 +23,13 @@ export interface ContentAtom {
 
 	/** A media item with no fixed duration waits for a client playback completion. */
 	waitForMediaEnd?: boolean;
+
+	/**
+	 * The button may be pressed only after this delay (seconds). A video or an audio question
+	 * asks for an answer in the middle of the playback, and a fixed `duration` in the package
+	 * postpones the button until the media has actually played for that time.
+	 */
+	pressDelay?: number;
 }
 
 /** An answer option of a question. */
@@ -81,6 +88,8 @@ export function buildContentAtoms(
 	question: Question,
 	readingSpeed: number,
 	resolveMedia: MediaResolver,
+	/** Known duration of a media file (seconds) or null when it could not be determined. */
+	getMediaDuration?: (item: ContentItem) => number | null,
 ): ContentAtom[] {
 	const atoms: ContentAtom[] = [];
 	const items = question.params.question?.items ?? [];
@@ -99,6 +108,7 @@ export function buildContentAtoms(
 				duration: Math.round(duration * 10),
 				waitForFinish,
 				isBackground: false,
+				pressDelay: 0,
 			});
 
 			continue;
@@ -114,12 +124,17 @@ export function buildContentAtoms(
 				duration: Math.round(MIN_TEXT_DURATION * 10),
 				waitForFinish: true,
 				isBackground: false,
+				pressDelay: 0,
 			});
 
 			continue;
 		}
 
-		const duration = explicitDuration > 0 ? explicitDuration : DEFAULT_MEDIA_DURATION;
+		const isMedia = resolved.type === 'video' || resolved.type === 'audio';
+		const mediaDuration = isMedia && explicitDuration <= 0 ? (getMediaDuration?.(item) ?? null) : null;
+		const duration = explicitDuration > 0
+			? explicitDuration
+			: mediaDuration && mediaDuration > 0 ? mediaDuration : DEFAULT_MEDIA_DURATION;
 
 		atoms.push({
 			placement: item.placement === 'background' ? 'background' : 'screen',
@@ -128,6 +143,13 @@ export function buildContentAtoms(
 			duration: Math.round(duration * 10),
 			waitForFinish,
 			isBackground: item.placement === 'background' || resolved.type === 'audio',
+			// A video or a sound question is answered while it plays: the button appears in the middle.
+			// An explicit `duration` is a promise that the interesting part lasts that long,
+			// so the button waits for it instead of appearing too early.
+			// A background media is not the content of the question, so the button does not wait for it
+			pressDelay: isMedia && item.placement !== 'background'
+				? (explicitDuration > 0 ? explicitDuration : duration / 2)
+				: 0,
 		});
 	}
 

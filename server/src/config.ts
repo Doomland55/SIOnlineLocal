@@ -25,6 +25,12 @@ export interface LocalServerConfig {
 	/** Directory for uploaded packages and extracted media. */
 	dataDir: string;
 
+	/**
+	 * Remove uploaded packages, extracted media and avatars when the server stops.
+	 * The data directory only holds copies of the content, so a next start does not need them.
+	 */
+	cleanupOnShutdown: boolean;
+
 	/** Directory with the built web client (index.html). Served as the site root when present. */
 	clientDir: string;
 
@@ -156,6 +162,27 @@ function getLocalAddress(): string {
 	return preferred ?? '127.0.0.1';
 }
 
+/** Turns a value into a boolean (`true`/`false` strings and numbers are accepted). */
+function booleanOr(value: unknown, fallback: boolean): boolean {
+	if (typeof value === 'boolean') {
+		return value;
+	}
+
+	if (typeof value === 'string') {
+		const normalized = value.trim().toLowerCase();
+
+		if (['true', '1', 'yes', 'on', '+'].includes(normalized)) {
+			return true;
+		}
+
+		if (['false', '0', 'no', 'off', '-'].includes(normalized)) {
+			return false;
+		}
+	}
+
+	return fallback;
+}
+
 /** Turns a value into a number, falling back to the default one. */
 function numberOr(value: unknown, fallback: number): number {
 	const parsed = typeof value === 'number' ? value : Number(value);
@@ -179,6 +206,7 @@ export function loadConfig(configPath: string | null = null): LocalServerConfig 
 		name: fileConfig.name ?? 'SIGame local server',
 		packagesDir: path.resolve(root, process.env.SI_PACKAGES_DIR ?? fileConfig.packagesDir ?? 'server/packages'),
 		dataDir: path.resolve(root, process.env.SI_DATA_DIR ?? fileConfig.dataDir ?? 'server/data'),
+		cleanupOnShutdown: booleanOr(process.env.SI_CLEANUP_ON_SHUTDOWN ?? fileConfig.cleanupOnShutdown, true),
 		clientDir: path.resolve(root, process.env.SI_CLIENT_DIR ?? fileConfig.clientDir ?? 'dist'),
 		maxPackageSizeMb: numberOr(fileConfig.maxPackageSizeMb, 512),
 		timeSettings: { ...DEFAULT_TIME_SETTINGS, ...(fileConfig.timeSettings ?? {}) },

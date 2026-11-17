@@ -8,6 +8,7 @@ import { PackageLibrary } from './game/library';
 import { Lobby } from './game/lobby';
 import { LocalContentStorage } from './api/storage';
 import { registerErrorHandling, registerRoutes, registerStatic } from './api/routes';
+import { cleanupDataDir } from './api/cleanup';
 import { SIHostHub } from './hubs/siHostHub';
 import { SIOnlineHub } from './hubs/sionlineHub';
 
@@ -152,7 +153,14 @@ async function main() {
 		log(`  #${game.id} «${game.session.name}» — ${publicBaseUrl} (пакет ${game.session.packageInfo.fileName})`);
 	}
 
+	let isShuttingDown = false;
+
 	const shutdown = () => {
+		if (isShuttingDown) {
+			return;
+		}
+
+		isShuttingDown = true;
 		log('Остановка сервера…');
 		hubHost.dispose();
 
@@ -160,8 +168,31 @@ async function main() {
 			game.dispose();
 		}
 
-		server.close(() => process.exit(0));
-		setTimeout(() => process.exit(0), 2000).unref();
+		server.close(() => {
+			cleanupOnShutdown();
+			process.exit(0);
+		});
+		setTimeout(() => {
+			cleanupOnShutdown();
+			process.exit(0);
+		}, 2000).unref();
+	};
+
+	/**
+	 * The data directory only holds copies of uploaded packages, extracted media and avatars,
+	 * so it is emptied on shutdown: the next start begins with a clean state.
+	 */
+	const cleanupOnShutdown = () => {
+		if (!config.cleanupOnShutdown) {
+			return;
+		}
+
+		try {
+			const { removed, failed } = cleanupDataDir(dataDir, log);
+			log(`Каталог данных очищен: удалено ${removed.length} объектов${failed.length > 0 ? `, не удалось удалить ${failed.length}` : ''}`);
+		} catch (e) {
+			log(`Не удалось очистить каталог данных: ${(e as Error).message}`);
+		}
 	};
 
 	process.on('SIGINT', shutdown);
