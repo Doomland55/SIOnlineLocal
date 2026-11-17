@@ -34,33 +34,56 @@ describe('Final round decisions', () => {
 	afterEach(() => { game.dispose(); jest.useRealTimers(); });
 
 	it('keeps bounded stakes and final answers secret until both are revealed', () => {
+		// A live showman that does not play assesses the answers; the players only see the results
+		game.session.showman.name = 'Ирина';
+		game.session.showman.isHuman = true;
+		game.session.showman.isConnected = true;
+		game.attachConnection('Ирина', { send: (_target, message: { Text: string }) => messages.push(message.Text), sendClose: () => { } });
+
 		jest.advanceTimersByTime(2000);
 		game.handleClientMessage('Alice', 'ANSWER\nyes'); // before answer phase
 		game.handleClientMessage('Alice', 'SET_STAKE\nStake\n201');
 		game.handleClientMessage('Alice', 'SET_STAKE\nStake\n1abc');
-		game.handleClientMessage('Carol', 'SET_STAKE\nStake\n1');
 		expect(messages.filter(message => message.startsWith('PERSONFINALSTAKE'))).toHaveLength(0);
 		game.handleClientMessage('Alice', 'SET_STAKE\nStake\n50');
 		game.handleClientMessage('Alice', 'SET_STAKE\nAllIn'); // cannot change a committed stake
 		game.handleClientMessage('Bob', 'SET_STAKE\nAllIn');
-		game.handleClientMessage('Alice', 'PASS');
-		expect(game.session.isQuestionPlaying).toBe(true);
 		expect(game.session.players[0].stake).toBe(50);
+
+		// Everybody has staked (Carol has no points and does not take part): the question starts at once
+		expect(messages.some(message => message.startsWith('CONTENT2\nscreen'))).toBe(true);
+		expect(game.session.isQuestionPlaying).toBe(true);
 		expect(messages.some(message => message.startsWith('PERSONSTAKE\n'))).toBe(false);
-		jest.advanceTimersByTime(6000);
+
+		jest.advanceTimersByTime(1000);
 		messages.length = 0;
 		game.handleClientMessage('Alice', 'ANSWER_VERSION\nsecret-draft');
 		game.handleClientMessage('Alice', 'ANSWER\nyes');
 		game.handleClientMessage('Alice', 'ANSWER\nwrong');
 		game.handleClientMessage('Bob', 'ANSWER\nwrong');
-		game.handleClientMessage('Carol', 'ANSWER\nyes');
-		expect(messages.some(message => /secret-draft|PLAYER_ANSWER|ANSWERS|PERSONSTAKE/.test(message))).toBe(false);
+		expect(messages.filter(message => /secret-draft|PLAYER_ANSWER|ANSWERS|PERSONSTAKE/.test(message))).toEqual([]);
 		expect(game.session.players.map(player => player.sum)).toEqual([200, 300, 0]);
-		jest.advanceTimersByTime(5000);
-		expect(game.session.players.map(player => player.sum)).toEqual([250, 0, 0]);
-		expect(messages).toContain('ANSWERS\nyes\nwrong\n');
+
+		// Every finalist has answered: the showman assesses the answers one by one
+		expect(messages.some(message => message.startsWith('ASK_VALIDATE'))).toBe(true);
+		expect(game.session.players.map(player => player.sum)).toEqual([200, 300, 0]);
+		expect(messages).toContain('ASK_VALIDATE\n0\nyes\n');
+
+		game.handleClientMessage('Ирина', 'VALIDATE\nyes\n+\n1');
+		expect(game.session.players[0].sum).toBe(250);
 		expect(messages).toContain('PERSONSTAKE\n0\n1\n50');
+		expect(messages).toContain('ANSWERS\nyes\n\n');
+
 		jest.advanceTimersByTime(3000);
+
+		// Alice manages the game (she is the first live player), so she assesses every answer
+		game.handleClientMessage('Ирина', 'VALIDATE\nwrong\n-\n1');
+		expect(game.session.players[1].sum).toBe(0);
+
+		expect(messages).toContain('ANSWERS\nyes\nwrong\n');
+
+		// The right answer is shown and the game is over once its content has played
+		jest.advanceTimersByTime(5000);
 		expect(game.session.phase).toBe(GamePhase.Finished);
 	});
 
@@ -73,7 +96,9 @@ describe('Final round decisions', () => {
 		game.handleClientMessage('Alice', 'PAUSE\n-');
 		jest.advanceTimersByTime(6000);
 		game.handleClientMessage('Alice', 'ANSWER_VERSION\nyes');
-		jest.advanceTimersByTime(5000);
+
+		// The server plays the showman: the draft of Alice is right, the empty answer of Bob is wrong
+		jest.advanceTimersByTime(15000);
 		expect(game.session.players.map(player => player.sum)).toEqual([201, 299, 0]);
 	});
 
@@ -86,8 +111,12 @@ describe('Final round decisions', () => {
 		game.attachConnection('Eve', { send: () => {}, sendClose: () => {} });
 		jest.advanceTimersByTime(6000);
 		game.handleClientMessage('Eve', 'ANSWER\nyes');
-		jest.advanceTimersByTime(5000);
+		jest.advanceTimersByTime(15000);
+
+		// Eve shows the answers now, but the answer of the absent Alice must not become hers
 		expect(seat.sum).toBe(777);
+		game.handleClientMessage('Eve', 'VALIDATE\n\n-\n1');
+		jest.advanceTimersByTime(3000);
 		seat.name = ' '; seat.isHuman = false; seat.isConnected = false;
 		expect(game.restoreSeat('Alice', PersonRole.Player, false)).toBe(true);
 		expect(seat.sum).toBe(150);
@@ -114,9 +143,10 @@ describe('Final round decisions', () => {
 		game.attachConnection('Alice', connections.Alice);
 		messages.length = 0;
 		game.onReconnect('Alice');
+		// The input is already open while the question is shown, so a returning player keeps it
 		expect(messages).toContain('ANSWER\ntext');
 		game.handleClientMessage('Alice', 'ANSWER\nyes');
-		jest.advanceTimersByTime(5000);
+		jest.advanceTimersByTime(15000);
 		expect(game.session.players[0].sum).toBe(250);
 	});
 

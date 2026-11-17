@@ -53,6 +53,13 @@ interface FinalParticipant {
 	stake: number | null;
 	answer: string | null;
 	draft: string;
+	/** Answer counters of the whole game; the final question adds its own one. */
+	rightAnswers: number;
+	wrongAnswers: number;
+	isReviewed: boolean;
+
+	/** Submission order: the review goes in the same order, and a player without an order did not submit. */
+	order: number;
 }
 
 /** A single game hosted by the local server. */
@@ -107,10 +114,16 @@ export class Game {
 
 	private pressTurn = 0;
 
+	/** Right and wrong answers of every player name during the whole game (for the final statistics). */
+	private readonly answerCounters = new Map<string, { right: number; wrong: number; gained: number; lost: number }>();
+
 	/** Final decisions are kept private until the simultaneous reveal. */
 	private finalParticipants = new Map<number, FinalParticipant>();
 
-	private finalStage: 'none' | 'themes' | 'stake' | 'content' | 'answer' | 'reveal' = 'none';
+	private finalStage: 'none' | 'themes' | 'stake' | 'content' | 'answer' | 'review' | 'reveal' = 'none';
+
+	/** Participants whose final answer is not assessed by the showman yet, in the reveal order. */
+	private finalReviewQueue: number[] = [];
 
 	private finalThemeRemaining = new Set<number>();
 
@@ -510,6 +523,19 @@ export class Game {
 			const pendingIndex = this.answersToValidate.keys().next().value;
 			if (pendingIndex !== undefined) {
 				this.sendTo(personName, this.buildAskValidate(pendingIndex));
+			} else if (this.finalStage === 'review' && this.finalReviewQueue.length > 0) {
+				// The showman got the answer to assess before the reconnect
+				const reviewIndex = this.finalReviewQueue[0];
+				const participant = this.finalParticipants.get(reviewIndex);
+
+				if (participant) {
+					this.sendTo(personName, buildMessage(
+						GameMessage.AskValidate,
+						reviewIndex,
+						escapeNewLines(participant.answer ?? participant.draft),
+						'',
+					));
+				}
 			}
 		}
 
@@ -518,7 +544,8 @@ export class Game {
 			if (participant?.name === personName) {
 				if (this.finalStage === 'stake' && participant.stake === null) {
 					this.sendFinalStakePrompt(participant);
-				} else if (this.finalStage === 'answer' && participant.answer === null) {
+				} else if ((this.finalStage === 'content' || this.finalStage === 'answer') && participant.answer === null) {
+					// The input is open from the beginning of the content, so a returning player keeps it
 					this.sendTo(personName, buildMessage(GameMessage.Answer, 'text'));
 				}
 			}
@@ -1938,6 +1965,7 @@ export class Game {
 			const participant = this.finalParticipants.get(index);
 			if (!this.isPaused && this.finalStage === 'answer' && participant?.name === sender && participant.answer === null) {
 				participant.answer = answer;
+				this.checkFinalAnswersComplete();
 			}
 			return;
 		}
@@ -2064,6 +2092,30 @@ export class Game {
 	 * Applies the answer of a player.
 	 * `factor` scales the price of the question: `0.5` and `2` are set by the showman, `0` cancels the answer.
 	 */
+	private countAnswer(name: string, isRight: boolean, amount = 0): void {
+		const counter = this.answerCounters.get(name) ?? { right: 0, wrong: 0, gained: 0, lost: 0 };
+
+		if (isRight) {
+			counter.right += 1;
+			counter.gained += Math.abs(amount);
+		} else {
+			counter.wrong += 1;
+			counter.lost += Math.abs(amount);
+		}
+
+		this.answerCounters.set(name, counter);
+	}
+
+	/**
+	 * True when the answer is counted for the statistics.
+	 * A cancelled answer or a question that is not played at all is not counted.
+	 */
+	private shouldCountAnswer(playerIndex: number, factor: number): boolean {
+		const player = this.session.players[playerIndex];
+
+		return factor > 0 && !!player?.name.trim();
+	}
+
 	private validateAnswer(playerIndex: number, answer: string, isRight: boolean, factor = 1): void {
 		const { session } = this;
 
@@ -2103,6 +2155,12 @@ export class Game {
 		this.pendingPressers = this.pendingPressers.filter(index => index !== playerIndex);
 		this.answersToValidate.delete(playerIndex);
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
+
+		if (this.shouldCountAnswer(playerIndex, factor)) {
+			this.countAnswer(player.name, isRight, isRight
+				? Math.round(session.currentPrice * factor)
+				: Math.round(this.getPenaltyAmount() * factor));
+		}
 
 		if (isRight) {
 			const reward = Math.round(session.currentPrice * factor);
@@ -2329,6 +2387,7 @@ export class Game {
 		session.isQuestionAnswerShown = false;
 		this.finalStage = 'none';
 		this.finalParticipants.clear();
+		this.finalReviewQueue = [];
 
 		session.themes = round.themes.map(theme => ({
 			name: theme.name,
@@ -2488,7 +2547,17 @@ export class Game {
 			player.stake = 0;
 			player.state = 'None';
 			if (this.isFinalParticipantSeat(player)) {
-				this.finalParticipants.set(index, { name: player.name, sum: player.sum, stake: null, answer: null, draft: '' });
+				this.finalParticipants.set(index, {
+					name: player.name,
+					sum: player.sum,
+					stake: null,
+					answer: null,
+					draft: '',
+					rightAnswers: 0,
+					wrongAnswers: 0,
+					isReviewed: false,
+					order: 0,
+				});
 			}
 		}
 		if (this.finalParticipants.size === 0) {
@@ -2504,11 +2573,18 @@ export class Game {
 			return;
 		}
 
-		this.atoms = buildContentAtoms(question, this.options.readingSpeed, item => this.resolveMedia(item));
+		this.atoms = buildContentAtoms(
+			question,
+			this.options.readingSpeed,
+			item => this.resolveMedia(item),
+			item => this.getMediaDuration(item),
+		);
 		this.answerOptions = buildAnswerOptions(question, item => this.resolveMedia(item));
 
 		this.sendAll(buildMessage(GameMessage.Question, session.currentPrice));
 		this.sendQuestionAnswers(session.showman.name);
+		// The stakes are secret, but every player must see how much they have left for the stake
+		this.sendSums();
 		this.sendAll(buildMessage(GameMessage.QuestionCaption, session.themes[themeIndex].name));
 		this.sendAll(buildMessage(GameMessage.QType, question.type || 'simple', 'True', 'False'));
 
@@ -2522,6 +2598,12 @@ export class Game {
 				this.sendAll(buildMessage(GameMessage.PersonFinalStake, index));
 			}
 		});
+
+		// Nobody has to make a stake: the question starts at once
+		if ([...this.finalParticipants.values()].every(item => item.stake !== null)) {
+			this.askFinalAnswers();
+			return;
+		}
 
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', this.getTimeSettings().timeForMakingStake * 10, -2));
 		this.scheduleMain(this.getTimeSettings().timeForMakingStake, () => this.askFinalAnswers());
@@ -2611,9 +2693,19 @@ export class Game {
 		participant.stake = stake;
 		this.session.players[index].stake = stake;
 		this.sendAll(buildMessage(GameMessage.PersonFinalStake, index));
+
+		// Every stake is made: do not keep the players waiting for the rest of the timer
+		if ([...this.finalParticipants.values()].every(item => item.stake !== null)) {
+			this.askFinalAnswers();
+		}
 	}
 
 	/** Asks all players to give their final answers. */
+	/**
+	 * Starts the content of the final question.
+	 * `content` is a normal question step: the players see the question for the reading time or for the
+	 * real duration of its media file, and only then the answer input is shown to them.
+	 */
 	private askFinalAnswers(): void {
 		const { session } = this;
 
@@ -2632,6 +2724,9 @@ export class Game {
 		});
 		this.finalStage = 'content';
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
+
+		// The answer input is opened before the question is shown, so the players could type at once
+		this.openFinalAnswerInputs();
 
 		// Show question content
 		this.atomIndex = 0;
@@ -2658,6 +2753,17 @@ export class Game {
 		this.scheduleMain(Math.max(atom.duration / 10, 0.2), () => this.showFinalContent());
 	}
 
+	/** Opens the answer input of every finalist without starting the answer timer yet. */
+	private openFinalAnswerInputs(): void {
+		this.finalParticipants.forEach((participant, index) => {
+			const player = this.session.players[index];
+
+			if (player?.name === participant.name && player.isHuman && player.isConnected) {
+				this.sendTo(participant.name, buildMessage(GameMessage.Answer, 'text'));
+			}
+		});
+	}
+
 	private askAllAnswers(): void {
 		const { session } = this;
 		if (session.phase !== GamePhase.Final || this.finalStage !== 'content') {
@@ -2673,6 +2779,7 @@ export class Game {
 				return;
 			}
 			if (player.isHuman && player.isConnected) {
+				// The input has been open since the content started, but a repeated one is harmless
 				this.sendTo(participant.name, buildMessage(GameMessage.Answer, 'text'));
 			} else if (player.isBot) {
 				this.schedule(1 + Math.random() * 2, () => {
@@ -2687,48 +2794,223 @@ export class Game {
 		this.scheduleMain(answerTime, () => this.finishFinalQuestion());
 	}
 
+	/** Called when a finalist has submitted the answer: the others must not wait for the timer. */
+	private checkFinalAnswersComplete(): void {
+		if (this.finalStage !== 'answer') {
+			return;
+		}
+
+		if ([...this.finalParticipants.values()].every(participant => participant.answer !== null)) {
+			this.finishFinalQuestion();
+		}
+	}
+
 	private finishFinalQuestion(): void {
 		const { session } = this;
 		if (session.phase !== GamePhase.Final || !session.isQuestionPlaying || this.finalStage !== 'answer') {
 			return;
 		}
 
-		this.finalStage = 'reveal';
+		this.cancelMainStep();
 		session.isQuestionPlaying = false;
-		this.cancelPending();
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
-		const answers = session.players.map((_player, index) => {
-			const participant = this.finalParticipants.get(index);
-			return escapeNewLines(participant ? participant.answer ?? participant.draft : '');
-		});
-		this.sendAll(buildMessage(GameMessage.Answers, ...answers));
-		this.showRightAnswer();
 
-		this.finalParticipants.forEach((participant, index) => {
-			const answer = participant.answer ?? participant.draft;
-			const stake = participant.stake ?? 1;
-			const isRight = answer.trim().length > 0 && this.isAnswerRight(answer);
-			const newSum = participant.sum + (isRight ? stake : -stake);
-			const player = session.players[index];
-			if (player?.name === participant.name) {
-				player.sum = newSum;
-				player.answer = answer;
-				player.stake = stake;
-				player.state = isRight ? 'Right' : 'Wrong';
-			} else {
-				// A disconnected participant can recover their updated score, never the new occupant's.
-				const saved = this.leftSeats.get(participant.name);
-				if (saved?.role === PersonRole.Player && saved.index === index) {
-					saved.sum = newSum;
-				}
+		// The player has answered as much as they could: an unfinished thought is still an answer
+		let order = 0;
+		for (const [index, participant] of this.finalParticipants) {
+			if (participant.answer === null) {
+				participant.answer = participant.draft;
 			}
-			this.sendAll(buildMessage(GameMessage.PersonStake, index, 1, stake));
-			this.sendAll(buildMessage(GameMessage.PersonFinalAnswer, index));
-			this.sendAll(buildMessage(GameMessage.Person, isRight ? '+' : '-', index, stake));
-		});
 
+			// The draft is sent by the client on every keystroke, so a player that has typed anything
+			// has answered even without pressing the submit button
+			participant.isReviewed = false;
+			order += 1;
+			participant.order = order;
+		}
+
+		this.startFinalReview();
+	}
+
+	/**
+	 * The showman assesses the final answers one by one: the player card of the seat is highlighted,
+	 * and the answer of the previous participant is already shown to everybody.
+	 */
+	private startFinalReview(): void {
+		this.finalStage = 'review';
+		this.finalReviewQueue = [...this.finalParticipants.keys()]
+			.sort((left, right) => (this.finalParticipants.get(left)?.order ?? 0) - (this.finalParticipants.get(right)?.order ?? 0));
+
+		if (this.finalReviewQueue.length === 0) {
+			this.finishFinalReview();
+			return;
+		}
+
+		const [first] = this.finalReviewQueue;
+		this.sendFinalReviewPrompt(first);
+
+		// Without a live showman nobody could assess the answers: the server plays the showman
+		if (!this.hasLiveManager()) {
+			this.scheduleFinalAutoReview(first);
+		}
+	}
+
+	/**
+	 * Shows the answer of the participant to the showman and opens the assessment window.
+	 * The answer also appears on the player card, so the other players see it once it is assessed.
+	 */
+	private sendFinalReviewPrompt(index: number): void {
+		const participant = this.finalParticipants.get(index);
+		const player = this.session.players[index];
+
+		if (!participant) {
+			return;
+		}
+
+		const answer = participant.answer ?? participant.draft;
+
+		// Everybody sees the answers that are already assessed
+		if ([...this.finalParticipants.values()].some(item => item.isReviewed)) {
+			this.sendAll(buildMessage(GameMessage.Answers, ...this.buildFinalAnswers()));
+		}
+
+		const managerName = this.getManagerName();
+
+		// Only a showman that is not a finalist gets the assessment window:
+		// the answers stay hidden from the other players until they are assessed
+		if (this.hasLiveManager()) {
+			this.sendTo(managerName, buildMessage(GameMessage.AskValidate, index, escapeNewLines(answer), ''));
+		}
+	}
+
+	/**
+	 * Answers of the final question in the seat order.
+	 * Only the answers already assessed are sent, so the unseen ones never leak to the clients.
+	 */
+	private buildFinalAnswers(revealAll = false): string[] {
+		return this.session.players.map((_player, index) => {
+			const participant = this.finalParticipants.get(index);
+
+			if (!participant || (!participant.isReviewed && !revealAll)) {
+				return '';
+			}
+
+			return escapeNewLines(participant.answer ?? participant.draft);
+		});
+	}
+
+	/** A game without a live showman is judged by the server. */
+	private scheduleFinalAutoReview(index: number): void {
+		this.scheduleMain(2, () => {
+			if (this.finalStage !== 'review' || this.finalReviewQueue[0] !== index) {
+				return;
+			}
+
+			const participant = this.finalParticipants.get(index);
+			const answer = participant?.answer ?? participant?.draft ?? '';
+
+			this.applyFinalVerdict(index, answer.trim().length > 0 && this.isAnswerRight(answer));
+		});
+	}
+
+	/** Applies the decision of the showman about a final answer. */
+	private applyFinalVerdict(index: number, isRight: boolean): void {
+		const { session } = this;
+		const participant = this.finalParticipants.get(index);
+
+		if (this.finalStage !== 'review' || !participant || participant.isReviewed) {
+			return;
+		}
+
+		const answer = participant.answer ?? participant.draft;
+		const stake = participant.stake ?? 1;
+		const newSum = participant.sum + (isRight ? stake : -stake);
+		const player = session.players[index];
+
+		participant.isReviewed = true;
+		participant.sum = newSum;
+
+		if (isRight) {
+			participant.rightAnswers += 1;
+		} else {
+			participant.wrongAnswers += 1;
+		}
+
+		this.countAnswer(participant.name, isRight, stake);
+
+		if (player?.name === participant.name) {
+			player.sum = newSum;
+			player.answer = answer;
+			player.stake = stake;
+			player.state = isRight ? 'Right' : 'Wrong';
+		} else {
+			// A disconnected participant can recover their updated score, never the new occupant's.
+			const saved = this.leftSeats.get(participant.name);
+			if (saved?.role === PersonRole.Player && saved.index === index) {
+				saved.sum = newSum;
+			}
+		}
+
+		this.sendAll(buildMessage(GameMessage.PersonStake, index, 1, stake));
+		this.sendAll(buildMessage(GameMessage.Person, isRight ? '+' : '-', index, stake));
+		// The answer is shown on the player card once it is assessed
+		this.sendAll(buildMessage(GameMessage.PlayerAnswer, index, escapeNewLines(answer)));
+		this.sendAll(buildMessage(GameMessage.Answers, ...this.buildFinalAnswers()));
 		this.sendSums();
+
+		// The next answer is assessed after a short pause so that the clients could show the result
+		this.scheduleMain(2, () => this.advanceFinalReview());
+	}
+
+	/** Moves the review to the next finalist. */
+	private advanceFinalReview(): void {
+		if (this.finalStage !== 'review') {
+			return;
+		}
+
+		this.finalReviewQueue.shift();
+
+		const [next] = this.finalReviewQueue;
+
+		if (next === undefined) {
+			this.finishFinalReview();
+			return;
+		}
+
+		this.sendFinalReviewPrompt(next);
+
+		if (!this.hasLiveManager()) {
+			this.scheduleFinalAutoReview(next);
+		}
+	}
+
+	/** Shows the right answer once every final answer is assessed. */
+	private finishFinalReview(): void {
+		const { session } = this;
+
+		if (this.finalStage !== 'review') {
+			return;
+		}
+
+		this.finalStage = 'reveal';
+		this.sendAll(buildMessage(GameMessage.Answers, ...this.buildFinalAnswers(true)));
+		this.showRightAnswer();
 		this.playAnswerContent(() => this.endGame());
+	}
+
+	/**
+	 * True when a live person shows the answers and can assess them.
+	 * A finalist never assesses their own answer, so a game without a separate showman is judged by the server.
+	 */
+	private hasLiveManager(): boolean {
+		const managerName = this.getManagerName();
+		const manager = managerName ? this.session.findPerson(managerName) : null;
+
+		if (!manager || !manager.isHuman || !manager.isConnected) {
+			return false;
+		}
+
+		return ![...this.finalParticipants.values()].some(participant => participant.name === manager.name);
 	}
 
 	/** Finishes the game. */
@@ -2753,15 +3035,22 @@ export class Game {
 		this.notifyChanged();
 	}
 
+	/**
+	 * Builds the `GAME_STATISTICS` message: name, right count, wrong count, rights total, wrongs total.
+	 * The players are ordered by their final score, so a client that keeps the order shows a sorted table.
+	 */
 	private buildStatistics(): string {
 		const parts: string[] = [GameMessage.GameStatistics];
 
-		for (const player of this.session.players) {
-			if (!player.name.trim()) {
-				continue;
-			}
+		const players = this.session.players
+			.map((player, index) => ({ player, index }))
+			.filter(({ player }) => player.name.trim().length > 0)
+			.sort((left, right) => right.player.sum - left.player.sum || left.index - right.index);
 
-			parts.push(player.name, '0', '0', String(player.sum), '0');
+		for (const { player } of players) {
+			const counter = this.answerCounters.get(player.name) ?? { right: 0, wrong: 0, gained: 0, lost: 0 };
+
+			parts.push(player.name, String(counter.right), String(counter.wrong), String(counter.gained), String(counter.lost));
 		}
 
 		return parts.join('\n');
@@ -3278,6 +3567,12 @@ export class Game {
 	}
 
 	private handleValidation(person: GamePerson, args: string[]): void {
+		// The final answers are assessed one by one by the showman
+		if (this.finalStage === 'review') {
+			this.handleFinalValidation(person, args);
+			return;
+		}
+
 		// The showman of an oral game marks the answer of a player as right or wrong.
 		// The client sends the answer text (`VALIDATE\n<answer>\n<+|->\n<factor>`),
 		// the answerer could be sent by its index too (that is what `ASK_VALIDATE` gives)
@@ -3310,6 +3605,32 @@ export class Game {
 		const answer = answeredIndex >= 0 ? subject : this.session.players[index].answer;
 
 		this.validateAnswer(index, answer, sign === '+', factor);
+	}
+
+	/**
+	 * Assesses the answer of the finalist that is currently shown to the showman.
+	 * Only the plain decision is meaningful here: the stake is already fixed by the player.
+	 */
+	private handleFinalValidation(person: GamePerson, args: string[]): void {
+		if (!this.canManage(person) || this.finalReviewQueue.length === 0) {
+			return;
+		}
+
+		// The showman sees one final answer at a time, so the decision is always about it
+		const index = this.finalReviewQueue[0];
+
+		// `ISRIGHT\n<sign>\n<factor>` has no answer in it, while `VALIDATE\n<answer>\n<sign>\n<factor>`
+		// starts with the text of the answer
+		const legacySign = args[1] === '+' || args[1] === '-' ? args[1] : null;
+		const sign = legacySign ?? (args[2] === '+' || args[2] === '-' ? args[2] : '+');
+		const factor = this.parseFactor(legacySign === null ? args[3] : args[2]);
+
+		// A cancelled decision leaves the answer for a later assessment
+		if (factor === 0) {
+			return;
+		}
+
+		this.applyFinalVerdict(index, sign === '+');
 	}
 
 	/**

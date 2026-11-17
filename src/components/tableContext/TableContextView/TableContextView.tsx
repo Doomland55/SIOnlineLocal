@@ -48,16 +48,20 @@ function renderBody(
 	answerType: string,
 ): JSX.Element | null {
 	switch (decisionType) {
-		case DecisionType.Answer:
+		case DecisionType.Answer: {
 			if (layoutMode === LayoutMode.OverlayPoints) {
 				return <div className='oral__answer'>{localization.pointAnswerHint}</div>;
 			}
 
-			if (layoutMode === LayoutMode.Simple && (answerType === 'text' || answerType === 'number')) {
+			// The final question opens the input together with the content, so the answer type may be empty
+			const type = answerType || 'text';
+
+			if (layoutMode === LayoutMode.Simple && (type === 'text' || type === 'number')) {
 				return <AnswerInput />;
 			}
 
 			break;
+		}
 
 		case DecisionType.Validation:
 			// Both the player (appeal) and the showman (oral game) decide whether the answer is right
