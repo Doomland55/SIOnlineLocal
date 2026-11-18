@@ -80,6 +80,19 @@ describe('Final question flow', () => {
 		expect(messages).toContain('ANSWER\ntext');
 	});
 
+	it('opens the answer input after the question itself, not right after the stakes', () => {
+		game.handleClientMessage('Alice', 'SET_STAKE\nAllIn');
+		game.handleClientMessage('Bob', 'SET_STAKE\nAllIn');
+		game.handleClientMessage('Carol', 'SET_STAKE\nAllIn');
+
+		const input = messages.indexOf('ANSWER\ntext');
+		const question = messages.findIndex(message => message.startsWith('CONTENT2\nscreen'));
+
+		// No player sees the field before the question: an empty screen with an input is not a question
+		expect(question).toBeGreaterThanOrEqual(0);
+		expect(input).toBeGreaterThan(question);
+	});
+
 	it('uses the minimum stake when the stake timer is over', () => {
 		jest.advanceTimersByTime(30000);
 
@@ -156,6 +169,53 @@ describe('Final question flow', () => {
 			'Alice', '1', '0', '100', '0',
 			'Bob', '0', '1', '0', '300',
 		]);
+	});
+
+	it('keeps an answer that arrives while the question is still on the screen', () => {
+		addShowman();
+
+		game.handleClientMessage('Alice', 'SET_STAKE\nAllIn');
+		game.handleClientMessage('Bob', 'SET_STAKE\nAllIn');
+		game.handleClientMessage('Carol', 'SET_STAKE\nAllIn');
+
+		// The input is open together with the question, so a player could type before the thinking timer
+		game.handleClientMessage('Alice', 'ANSWER\nСтавка');
+
+		// The content of the question takes a few seconds: the answer must not be lost meanwhile
+		jest.advanceTimersByTime(5000);
+		game.handleClientMessage('Bob', 'ANSWER\nСтавка');
+		game.handleClientMessage('Carol', 'ANSWER\nнет');
+
+		// The showman sees the answer of every finalist, including the one given in advance
+		const prompts = messages.filter(message => message.startsWith('ASK_VALIDATE'));
+		expect(prompts[0]).toBe('ASK_VALIDATE\n0\nСтавка\n');
+
+		game.handleClientMessage('Ирина', 'VALIDATE\nСтавка\n+\n1');
+		jest.advanceTimersByTime(3000);
+
+		const second = messages.filter(message => message.startsWith('ASK_VALIDATE'));
+		expect(second).toHaveLength(2);
+		expect(second[1]).toBe('ASK_VALIDATE\n1\nСтавка\n');
+
+		game.dispose();
+	});
+
+	it('does not ask a player for the answer twice', () => {
+		addShowman();
+
+		game.handleClientMessage('Alice', 'SET_STAKE\nAllIn');
+		game.handleClientMessage('Bob', 'SET_STAKE\nAllIn');
+		game.handleClientMessage('Carol', 'SET_STAKE\nAllIn');
+
+		const before = messages.filter(message => message === 'ANSWER\ntext').length;
+		game.handleClientMessage('Alice', 'ANSWER\nСтавка');
+		jest.advanceTimersByTime(5000);
+
+		// Alice has already sent the answer, so only the two other finalists are asked again
+		const after = messages.filter(message => message === 'ANSWER\ntext').length;
+		expect(after - before).toBe(2);
+
+		game.dispose();
 	});
 
 	it('falls back to the server decision when a finalist manages the game', () => {

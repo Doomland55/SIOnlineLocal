@@ -88,6 +88,9 @@ export class Game {
 	/** Answer options of the current question. */
 	private answerOptions: AnswerOptionPlan[] = [];
 
+	/** The answer options are already on the screens of the clients. */
+	private answerOptionsShown = false;
+
 	/** Players who have already answered the current question. */
 	private readonly answeredPlayers = new Set<number>();
 
@@ -102,6 +105,13 @@ export class Game {
 	 * so the players answer in the middle of it (or after the `duration` from the package).
 	 */
 	private pressPending: { atom: ContentAtom; delay: number; step?: PendingStep } | null = null;
+
+	/**
+	 * The media of the question is paused while a player types an answer.
+	 * The clients pause the playback when the button is blocked, and this flag tells
+	 * whether a `RESUME` message has to be sent when the answer turns out to be wrong.
+	 */
+	private mediaPausedByAnswer = false;
 
 	/**
 	 * Minimum score that a player must have to answer the current question.
@@ -1605,6 +1615,8 @@ export class Game {
 		this.answersToValidate.clear();
 		this.pendingPressers = [];
 		this.pressPending = null;
+		this.mediaPausedByAnswer = false;
+		this.answerOptionsShown = false;
 		this.atomIndex = 0;
 
 
@@ -1749,20 +1761,30 @@ export class Game {
 			return;
 		}
 
-		if (this.answerOptions.length > 0) {
+		if (this.answerOptions.length > 0 && !this.answerOptionsShown) {
 			this.showAnswerOptions();
 			return;
 		}
 
-		this.beginPressPhase();
+		// The end of the content is the last moment to announce the button, even if the media
+		// timer has not fired yet (a client without the exact media duration must not hang)
+		this.pressPending = null;
+		this.startPressPhase();
 	}
 
-	/** Shows answer options one by one. */
+	/**
+	 * Shows answer options one by one.
+	 *
+	 * The options belong to the question, not to the end of its content: a media question shows them
+	 * as soon as the players are allowed to press the button, so the options are on the screen
+	 * while the video or the sound is still playing.
+	 */
 	private showAnswerOptions(): void {
+		this.answerOptionsShown = true;
 		let index = 0;
 		const showNext = () => {
 			if (index >= this.answerOptions.length) {
-				this.scheduleMain(0.3, () => this.beginPressPhase());
+				this.scheduleMain(0.3, () => this.startPressPhase());
 				return;
 			}
 			const option = this.answerOptions[index];
@@ -1820,18 +1842,32 @@ export class Game {
 		pending.step = this.schedule(pending.delay, () => this.enablePressPhase());
 	}
 
-	/** Starts the press phase right now. */
+	/** Starts the press phase right now (the answer options are shown first in a choice question). */
 	private enablePressPhase(): void {
-		const { session } = this;
-
 		this.pressPending = null;
+		this.startPressPhase();
+	}
+
+	/** Announces the button right now, without waiting for the media of the question. */
+	private startPressPhase(): void {
+		const { session } = this;
 
 		if (!session.isQuestionPlaying || session.isQuestionAnswerShown) {
 			return;
 		}
 
+		// The button is available again: nothing holds the media of the question anymore
+		this.resumeQuestionMedia();
+
 		this.pendingPressers = this.collectPressers();
 		this.pressTurn += 1;
+
+		// A choice question shows its options while the media is still playing: the players
+		// answer in the middle of it, so waiting for the end of the video would hide the options
+		if (this.answerOptions.length > 0 && !this.answerOptionsShown) {
+			this.showAnswerOptions();
+			return;
+		}
 
 		if (this.pendingPressers.length === 0) {
 			this.finishQuestionWithoutAnswer();
@@ -1854,6 +1890,41 @@ export class Game {
 		});
 
 		this.scheduleBotPresses();
+	}
+
+	/**
+	 * Pauses the media of the question while a player answers it.
+	 *
+	 * The client stops the playback by itself when the button is blocked, but it does it once:
+	 * an explicit `RESUME` from the server is what brings the playback back,
+	 * and the client keeps the position of the paused media.
+	 */
+	private pauseQuestionMedia(): void {
+		if (!this.hasQuestionMedia()) {
+			return;
+		}
+
+		this.mediaPausedByAnswer = true;
+	}
+
+	/** Continues the media of the question from the place where it was paused. */
+	private resumeQuestionMedia(): void {
+		if (!this.mediaPausedByAnswer) {
+			return;
+		}
+
+		this.mediaPausedByAnswer = false;
+
+		if (!this.session.isQuestionPlaying || this.session.isQuestionAnswerShown) {
+			return;
+		}
+
+		this.sendAll(buildMessage(GameMessage.Resume));
+	}
+
+	/** True when the question shows or plays media that could be paused. */
+	private hasQuestionMedia(): boolean {
+		return this.atoms.some(atom => atom.type === 'video' || atom.type === 'audio' || atom.type === 'html');
 	}
 
 	/** Makes bots press the button from time to time. */
@@ -1904,6 +1975,10 @@ export class Game {
 		session.answererIndex = index;
 		session.answerers = [index];
 		this.pendingPressers = this.pendingPressers.filter(value => value !== index);
+
+		// The media of the question is paused while the answer is typed (or spoken) and
+		// continues from the same place if the answer turns out to be wrong
+		this.pauseQuestionMedia();
 
 		this.sendAll(buildMessage(GameMessage.Timer, 1, 'STOP'));
 		this.sendAll(buildMessage(GameMessage.EndTry, index));
@@ -1963,10 +2038,16 @@ export class Game {
 
 		if (this.session.phase === GamePhase.Final) {
 			const participant = this.finalParticipants.get(index);
-			if (!this.isPaused && this.finalStage === 'answer' && participant?.name === sender && participant.answer === null) {
-				participant.answer = answer;
-				this.checkFinalAnswersComplete();
+
+			if (!this.isPaused && participant?.name === sender && participant.answer === null) {
+				// The input of the final question is open while the question is shown: an answer that
+				// comes early is not lost, it waits for the assessment stage like any other one
+				if (this.finalStage === 'content' || this.finalStage === 'answer') {
+					participant.answer = answer;
+					this.checkFinalAnswersComplete();
+				}
 			}
+
 			return;
 		}
 
@@ -2030,9 +2111,11 @@ export class Game {
 
 		if (this.session.phase === GamePhase.Final) {
 			const participant = this.finalParticipants.get(index);
-			if (!this.isPaused && this.finalStage === 'answer' && participant?.name === sender && participant.answer === null) {
+
+			if (!this.isPaused && participant?.name === sender && participant.answer === null) {
 				participant.draft = answer;
 			}
+
 			return;
 		}
 
@@ -2138,6 +2221,8 @@ export class Game {
 				return;
 			}
 
+			// The answer is cancelled, not judged: the media keeps playing
+			this.resumeQuestionMedia();
 			this.scheduleMain(1, () => this.beginPressPhase());
 			return;
 		}
@@ -2187,6 +2272,8 @@ export class Game {
 			return;
 		}
 
+		// A wrong answer does not take the media away: it continues from the pause place
+		this.resumeQuestionMedia();
 		this.scheduleMain(1, () => this.beginPressPhase());
 	}
 
@@ -2287,6 +2374,7 @@ export class Game {
 		this.closingQuestion = true;
 		this.pendingPressers = [];
 		this.pressPending = null;
+		this.mediaPausedByAnswer = false;
 		this.cancelPending(true);
 		this.restoreRoundTimer();
 
@@ -2700,11 +2788,14 @@ export class Game {
 		}
 	}
 
-	/** Asks all players to give their final answers. */
 	/**
 	 * Starts the content of the final question.
 	 * `content` is a normal question step: the players see the question for the reading time or for the
 	 * real duration of its media file, and only then the answer input is shown to them.
+	 *
+	 * The input is opened together with the content, so a player is never left without a field to type in,
+	 * but no player gets it before the question itself: an answer typed earlier is kept by the server
+	 * and waits for the assessment stage.
 	 */
 	private askFinalAnswers(): void {
 		const { session } = this;
@@ -2725,10 +2816,7 @@ export class Game {
 		this.finalStage = 'content';
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'STOP'));
 
-		// The answer input is opened before the question is shown, so the players could type at once
-		this.openFinalAnswerInputs();
-
-		// Show question content
+		// Show question content; the answer input is opened together with the first atom
 		this.atomIndex = 0;
 		this.showFinalContent();
 	}
@@ -2750,15 +2838,26 @@ export class Game {
 
 		this.sendAll([GameMessage.Content2, 'screen', 0, '', atom.type, '',
 			atom.type === 'text' ? escapeNewLines(atom.value) : atom.value].join('\n'));
+
+		// The question is on the screen now, so the players may type the answer while they read it.
+		// The field goes after the question itself: an input over an empty table looks like a glitch.
+		if (this.atomIndex === 1) {
+			this.openFinalAnswerInputs();
+		}
+
 		this.scheduleMain(Math.max(atom.duration / 10, 0.2), () => this.showFinalContent());
 	}
 
-	/** Opens the answer input of every finalist without starting the answer timer yet. */
+	/**
+	 * Opens the answer input of every finalist without starting the answer timer yet.
+	 * A participant that has already sent the answer is not asked again.
+	 */
 	private openFinalAnswerInputs(): void {
 		this.finalParticipants.forEach((participant, index) => {
 			const player = this.session.players[index];
 
-			if (player?.name === participant.name && player.isHuman && player.isConnected) {
+			if (player?.name === participant.name && player.isHuman && player.isConnected
+				&& participant.answer === null) {
 				this.sendTo(participant.name, buildMessage(GameMessage.Answer, 'text'));
 			}
 		});
@@ -2779,8 +2878,11 @@ export class Game {
 				return;
 			}
 			if (player.isHuman && player.isConnected) {
-				// The input has been open since the content started, but a repeated one is harmless
-				this.sendTo(participant.name, buildMessage(GameMessage.Answer, 'text'));
+				// The input has been open since the content started: a player that has already sent
+				// the answer must not be asked for it again
+				if (participant.answer === null) {
+					this.sendTo(participant.name, buildMessage(GameMessage.Answer, 'text'));
+				}
 			} else if (player.isBot) {
 				this.schedule(1 + Math.random() * 2, () => {
 					if (this.finalStage === 'answer' && participant.answer === null) {
@@ -2792,6 +2894,9 @@ export class Game {
 
 		this.sendAll(buildMessage(GameMessage.Timer, 2, 'GO', answerTime * 10, -2));
 		this.scheduleMain(answerTime, () => this.finishFinalQuestion());
+
+		// Everybody could have answered while the question was shown: the thinking timer is useless then
+		this.checkFinalAnswersComplete();
 	}
 
 	/** Called when a finalist has submitted the answer: the others must not wait for the timer. */

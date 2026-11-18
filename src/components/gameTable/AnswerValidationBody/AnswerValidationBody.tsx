@@ -15,7 +15,6 @@ function getAnswers(answers: string[]): React.ReactNode {
 
 const AnswerValidationBody: React.FC = () => {
 	const validation = useAppSelector(state => state.room2.validation);
-	const isOral = useAppSelector(state => state.room2.settings.oral);
 
 	const [firstValidationItem] = validation.queue;
 
@@ -46,8 +45,9 @@ const AnswerValidationBody: React.FC = () => {
 					<AutoSizedText maxFontSize={32} className='answererName'>
 						{localization.playerAnswerLabel.replace('{0}', firstValidationItem.name)}
 					</AutoSizedText>
-					{/* In an oral game the answer is spoken, so the empty answer block is not shown at all */}
-					{!isOral && firstValidationItem.answer.trim().length > 0
+					{/* A spoken answer has no text at all, while the answer of the final question is always typed:
+						the text is shown whenever the server has sent it, whatever the rules of the game are */}
+					{firstValidationItem.answer.trim().length > 0
 						? <AutoSizedText maxFontSize={32} className='playerAnswer' title={localization.playersAnswer}>
 							<ClickableAnswer text={firstValidationItem.answer} />
 						</AutoSizedText>
